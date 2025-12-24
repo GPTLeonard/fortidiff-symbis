@@ -1,4 +1,3 @@
-const MAX_PROMPT_CHARS = 40000;
 const DEFAULT_TEMPERATURE = 0.2;
 
 module.exports = async function (context, req) {
@@ -22,11 +21,6 @@ module.exports = async function (context, req) {
 
     if (!prompt) {
       context.res = { status: 400, body: "Missing prompt." };
-      return;
-    }
-
-    if (prompt.length > MAX_PROMPT_CHARS) {
-      context.res = { status: 413, body: "Prompt too large." };
       return;
     }
 
