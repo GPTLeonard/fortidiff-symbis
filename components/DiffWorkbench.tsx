@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import FilePicker from "@/components/FilePicker";
-import { type ExtractedDiff, extractDiff, optimizeDiffForAI } from "@/lib/diff";
+import { type ExtractedDiff, extractDiff, optimizeDiffForAI, generateContextualDiff } from "@/lib/diff";
 import { type DetectedDate, detectConfigDate } from "@/lib/date";
 import { copyToClipboard, downloadText } from "@/lib/download";
 import { ArrowLeftRight, Copy, Download, FileJson, FileText, Split, Terminal } from "lucide-react";
@@ -71,7 +71,7 @@ export default function DiffWorkbench() {
     const handleCopy = async () => {
         if (!extracted) return;
         let text = "";
-        if (activeOutput === "changes") text = extracted.changesOnlyText;
+        if (activeOutput === "changes") text = extracted.contextualDiff;
         else if (activeOutput === "unified") text = extracted.unifiedDiff;
         else text = JSON.stringify(extracted.hunksJson, null, 2);
 
@@ -84,7 +84,7 @@ export default function DiffWorkbench() {
         if (!extracted) return;
         let text = "";
         let ext = "txt";
-        if (activeOutput === "changes") { text = extracted.changesOnlyText; ext = "txt"; }
+        if (activeOutput === "changes") { text = extracted.contextualDiff; ext = "txt"; }
         else if (activeOutput === "unified") { text = extracted.unifiedDiff; ext = "diff"; }
         else { text = JSON.stringify(extracted.hunksJson, null, 2); ext = "json"; }
 
@@ -102,7 +102,7 @@ export default function DiffWorkbench() {
         if (!extracted) return;
 
         // Optimized for AI: Truncate secrets and heavy blobs
-        const optimizedDiff = optimizeDiffForAI(extracted.changesOnlyText);
+        const optimizedDiff = optimizeDiffForAI(extracted.contextualDiff);
 
         const buildPrompt = (diffContent: string) => `ROL
 Je bent een senior netwerk- en security engineer gespecialiseerd in Fortinet FortiGate configuraties.
@@ -113,11 +113,12 @@ Analyseer het aangeleverde configuratieverschil en produceer een duidelijke, fei
 Gebruik uitsluitend informatie uit de input. Verzin niets.
 
 INPUT
-De input bevat uitsluitend regels die zijn gewijzigd, toegevoegd of verwijderd
-(regels beginnen met "+" of "-").
+De input bevat config-headers en alleen gewijzigde edit-blokken.
+Wijzigingen zijn gemarkeerd met "+" of "-"; ongewijzigde contextregels beginnen met twee spaties.
 
 REGELS
-- Baseer elke conclusie op concrete diff-regels.
+- Baseer conclusies op expliciete wijzigingen (+ of -). Gebruik contextregels alleen om de wijziging te duiden.
+- Behandel ongewijzigde contextregels nooit als een wijziging.
 - Groepeer logisch (bijvoorbeeld: Interfaces, VPN, Policies, System, Scripts, Certificates).
 - Benoem ENC values, passwords en certificaten alleen als "gewijzigd", nooit inhoud tonen.
 - Negeer of markeer ruis (timestamps, conf_file_ver, auto-backups) expliciet als niet-functioneel.
@@ -147,10 +148,7 @@ ${diffContent}`;
         } else {
             // Fallback for larger payloads (Auto-copy)
             await copyToClipboard(finalPrompt);
-            const placeholder = `ROL
-Je bent een senior netwerk- en security engineer gespecialiseerd in Fortinet FortiGate configuraties.
-
-[SYSTEM: De configuratie-diff was te groot voor de URL (>10k chars). De volledige prompt (inclusief data) is naar je klembord gekopieerd. PLAK HIERONDER om te starten.]`;
+            const placeholder = `[SYSTEM: De configuratie-diff was te groot voor de URL (>10k chars). De volledige prompt (inclusief data) is naar je klembord gekopieerd. PLAK HIERONDER om te starten.]`;
             const url = `https://chat.symbis.ai/c/new?prompt=${encodeURIComponent(placeholder)}&submit=false`;
             window.open(url, "_blank");
             setCopied(true);
@@ -253,7 +251,7 @@ Je bent een senior netwerk- en security engineer gespecialiseerd in Fortinet For
 
                         <div className="flex gap-2 bg-[#0a0e05]/60 p-1.5 rounded-lg border border-[#94A807]/10">
                             {[
-                                { id: "changes", label: "Changes Only", icon: FileText },
+                                { id: "changes", label: "Contextual Changes", icon: FileText },
                                 { id: "unified", label: "Unified Diff", icon: Split },
                                 { id: "json", label: "JSON Structure", icon: FileJson },
                             ].map((tab) => (
@@ -302,7 +300,7 @@ Je bent een senior netwerk- en security engineer gespecialiseerd in Fortinet For
                                 readOnly
                                 value={
                                     activeOutput === "changes"
-                                        ? extracted.changesOnlyText
+                                        ? extracted.contextualDiff
                                         : activeOutput === "unified"
                                             ? extracted.unifiedDiff
                                             : JSON.stringify(extracted.hunksJson, null, 2)

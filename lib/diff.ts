@@ -1,4 +1,4 @@
-import { createTwoFilesPatch, parsePatch } from "diff";
+import { createTwoFilesPatch, parsePatch, diffLines, Change } from "diff";
 
 export type ExtractedDiff = {
     unifiedDiff: string;
@@ -11,6 +11,7 @@ export type ExtractedDiff = {
         changesOnly: string[];
     }>;
     changesOnlyText: string;
+    contextualDiff: string;
     stats: {
         added: number;
         removed: number;
@@ -69,12 +70,198 @@ export function extractDiff(oldText: string, newText: string): ExtractedDiff {
         unifiedDiff,
         hunksJson,
         changesOnlyText: changesOnlyLines.join("\n"),
+        contextualDiff: generateContextualDiff(oldText, newText),
         stats: {
             added,
             removed,
             hunks: hunksJson.length
         }
     };
+}
+
+/**
+ * Generates a "Smart Context" diff that includes the full parent block (config/edit ... next/end)
+ * for any change, ensuring the AI sees the full hierarchy.
+ */
+export function generateContextualDiff(oldText: string, newText: string): string {
+    const differences = diffLines(oldText, newText);
+    const lines: string[] = [];
+
+    // We basically want to walk the diff, and whenever we hit a change,
+    // we assume the "New" version of the block is the authority for context,
+    // but we show the +/- for the specific lines.
+
+    // Actually, reconstructing the tree is hard from just the diff stream.
+    // Simpler structures:
+    // 1. Split newText into lines.
+    // 2. Identify "Dirty" indices (lines that are part of an add or close to a remove).
+
+    // Let's stick to a robust heuristics based on the standard Unified Diff approach
+    // but with massive context, then filtering lines that are NOT relevant parents.
+
+    // Alternate Strategy:
+    // 1. Create a map of "Changed Lines" in the new File.
+    // 2. Walk the new file.
+    // 3. Keep a stack of "Parent Headers" (config/edit).
+    // 4. If we encounter a changed line, mark the current stack as "Relevant".
+    // 5. If a stack is Relevant, we must print it.
+
+    // Let's implement this Strategy.
+
+    // Step 1: Map changed lines in New File
+    // We need to know which lines in `newText` correspond to an `added` or `modified` change.
+    const newLines = newText.split("\n");
+    const changedIndices = new Set<number>(); // 0-indexed line numbers in newText
+
+    let currentNewIndex = 0;
+
+    // Temporarily tracking changes to map them
+    // Note: Re-running diffLines is cheap for text files.
+    for (const part of differences) {
+        if (part.added) {
+            for (let i = 0; i < part.count!; i++) {
+                changedIndices.add(currentNewIndex + i);
+            }
+            currentNewIndex += part.count!;
+        } else if (part.removed) {
+            // Removed lines don't exist in newFile, so we can't map them to an index directly.
+            // But we want to show them!
+            // We'll handle removals by checking if the *previous* or *next* line is touched.
+            // Actually, we can assume the "context point" is the current index.
+            changedIndices.add(currentNewIndex); // Mark this insertion point as dirty
+        } else {
+            currentNewIndex += part.count!;
+        }
+    }
+
+    // Step 2: Identify Blocks to Keep
+    // A block is defined by indent level or keywords. 
+    // FortiGate: 'config' starts a block. 'edit' starts a sub-block. 'next'/'end' ends them.
+    // We want: If line K is changed, keep its parent blocks recursively.
+    // AND keep all siblings in the immediate parent block (user request: "Alles tussen config en end").
+
+    const linesToKeep = new Set<number>();
+    const stack: { lineIndex: number, indent: number }[] = [];
+
+    // Helper to add a range to keep
+    const keepRange = (start: number, end: number) => {
+        for (let i = start; i <= end; i++) linesToKeep.add(i);
+    };
+
+    const openBlocks: { start: number; type: "config" | "edit"; hasChange: boolean }[] = [];
+
+    for (let i = 0; i < newLines.length; i++) {
+        const line = newLines[i];
+        const trimmed = line.trim();
+
+        // Start Block
+        if (trimmed.startsWith("config ")) {
+            openBlocks.push({ start: i, type: "config", hasChange: false });
+        } else if (trimmed.startsWith("edit ")) {
+            openBlocks.push({ start: i, type: "edit", hasChange: false });
+        }
+
+        // Check Change
+        // Use a lax check: if this line is changed, or if it's an "edit/set" that is adjacent to a removal?
+        if (changedIndices.has(i)) {
+            // Mark all open blocks as having a change
+            for (const b of openBlocks) b.hasChange = true;
+        }
+
+        // End Block
+        if (trimmed === "next" || trimmed === "end") {
+            const block = openBlocks.pop();
+            if (block) {
+                if (block.hasChange || changedIndices.has(i)) {
+                    if (block.type === "edit") {
+                        // Keep only the changed edit block for focused context.
+                        keepRange(block.start, i);
+                    } else {
+                        // Keep just the config header and end marker.
+                        linesToKeep.add(block.start);
+                        linesToKeep.add(i);
+                    }
+                    // Also mark the parent as having a change (bubble up)
+                    if (openBlocks.length > 0) openBlocks[openBlocks.length - 1].hasChange = true;
+                }
+            }
+        }
+
+        // Global/orphan lines (like 'set ...' at root level? unlikely but possible)
+        // If a line is changed and logically top-level?
+        if (changedIndices.has(i) && openBlocks.length === 0) {
+            linesToKeep.add(i);
+        }
+    }
+
+    // Step 3: Construct the Result
+    // ensuring we include the +/- markers. This is the hardest part: injecting the diff markers into the "New File" view.
+    // A pure "New File" dump misses the "Old Values".
+
+    // HYBRID APPROACH:
+    // We will build the output by iterating the `diffLines` again.
+    // But we only output context lines if they are in `linesToKeep`.
+    // Changed lines (add/remove) are ALWAYS output.
+
+    // We need a mapping from "Diff Part" to "New File Line Index" to check `linesToKeep`.
+
+    let result = "";
+    currentNewIndex = 0;
+
+    const MAX_CONTEXT_LINE = 180;
+    const CONTEXT_TRUNCATE_TO = 140;
+    const truncateContextLine = (line: string) => {
+        if (line.length <= MAX_CONTEXT_LINE) return line;
+        return `${line.substring(0, CONTEXT_TRUNCATE_TO)}...[TRUNCATED_UNCHANGED_LINE]`;
+    };
+
+    // We need to inject "..." markers if we skip lines?
+    let skipping = false;
+
+    for (const part of differences) {
+        if (part.added) {
+            // Output all added lines with "+"
+            // Also these are "New File" lines, so they update index.
+            for (const line of part.value.split("\n")) {
+                if (line === "") continue; // split cleanup
+                result += `+ ${line}\n`;
+            }
+            skipping = false;
+            currentNewIndex += part.count!;
+        } else if (part.removed) {
+            // Output all removed lines with "-"
+            // These DO NOT advance newIndex.
+            for (const line of part.value.split("\n")) {
+                if (line === "") continue;
+                result += `- ${line}\n`;
+            }
+            skipping = false;
+        } else {
+            // Context lines (Unchanged)
+            // We check if these lines are in `linesToKeep`.
+            const contextLines = part.value.split("\n");
+            // Remove trailing empty from split
+            if (contextLines[contextLines.length - 1] === "") contextLines.pop();
+
+            for (let i = 0; i < contextLines.length; i++) {
+                const line = contextLines[i];
+                const realIndex = currentNewIndex + i;
+
+                if (linesToKeep.has(realIndex)) {
+                    if (skipping) {
+                        // result += "  ...\n"; // Optional visual separator
+                        skipping = false;
+                    }
+                    result += `  ${truncateContextLine(line)}\n`;
+                } else {
+                    skipping = true;
+                }
+            }
+            currentNewIndex += part.count!;
+        }
+    }
+
+    return result;
 }
 
 /**
