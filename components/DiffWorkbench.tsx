@@ -33,6 +33,9 @@ export default function DiffWorkbench() {
     const [newFile, setNewFile] = useState<FileState>(null);
     const [activeOutput, setActiveOutput] = useState<"changes" | "unified" | "json">("changes");
     const [copied, setCopied] = useState(false);
+    const [aiOutput, setAiOutput] = useState<string>("");
+    const [aiError, setAiError] = useState<string>("");
+    const [aiLoading, setAiLoading] = useState(false);
 
     // Auto-swap logic
     useEffect(() => {
@@ -98,13 +101,7 @@ export default function DiffWorkbench() {
         else setNewFile(fileState);
     };
 
-    const handleSymGPT = async () => {
-        if (!extracted) return;
-
-        // Optimized for AI: Truncate secrets and heavy blobs
-        const optimizedDiff = optimizeDiffForAI(extracted.contextualDiff);
-
-        const buildPrompt = (diffContent: string) => `ROL
+    const buildPrompt = (diffContent: string) => `ROL
 Je bent een senior netwerk- en security engineer gespecialiseerd in Fortinet FortiGate configuraties.
 Je schrijft professionele changelogs voor CAB en operations.
 
@@ -135,6 +132,12 @@ OUTPUTSTRUCTUUR
 CONFIGURATIEVERSCHIL
 ${diffContent}`;
 
+    const handleSymGPT = async () => {
+        if (!extracted) return;
+
+        // Optimized for AI: Truncate secrets and heavy blobs
+        const optimizedDiff = optimizeDiffForAI(extracted.contextualDiff);
+
         // URL safety limit (User requested exactly 10,000 chars)
         const MAX_URL_LENGTH = 10000;
 
@@ -153,6 +156,38 @@ ${diffContent}`;
             window.open(url, "_blank");
             setCopied(true);
             setTimeout(() => setCopied(false), 2000);
+        }
+    };
+
+    const handleAzureGPT = async () => {
+        if (!extracted) return;
+
+        setAiError("");
+        setAiOutput("");
+        setAiLoading(true);
+
+        try {
+            const optimizedDiff = optimizeDiffForAI(extracted.contextualDiff);
+            const finalPrompt = buildPrompt(optimizedDiff);
+
+            const res = await fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt: finalPrompt })
+            });
+
+            if (!res.ok) {
+                const errorText = await res.text();
+                throw new Error(errorText || "AI request failed.");
+            }
+
+            const data = await res.json();
+            setAiOutput(String(data.text || ""));
+        } catch (err) {
+            const message = err instanceof Error ? err.message : "Unexpected error.";
+            setAiError(message);
+        } finally {
+            setAiLoading(false);
         }
     };
 
@@ -310,7 +345,7 @@ ${diffContent}`;
                         </div>
 
                         {/* SymGPT Integration */}
-                        <div className="flex justify-end">
+                        <div className="flex flex-wrap justify-end gap-3">
                             <button
                                 onClick={handleSymGPT}
                                 className="bg-[#FFEB39] hover:bg-[#ffe600] text-[#243305] px-6 py-3 rounded-xl font-bold flex items-center gap-3 shadow-[0_0_20px_rgba(255,235,57,0.3)] hover:shadow-[0_0_30px_rgba(255,235,57,0.5)] transition-all transform hover:scale-[1.02] active:scale-[0.98]"
@@ -322,7 +357,27 @@ ${diffContent}`;
                                 </svg>
                                 Analyze with SymGPT
                             </button>
+                            <button
+                                onClick={handleAzureGPT}
+                                className="bg-[#0f1a07] hover:bg-[#1a2b0a] text-[#FFEB39] px-6 py-3 rounded-xl font-bold flex items-center gap-3 border border-[#FFEB39]/30 shadow-[0_0_20px_rgba(148,168,7,0.2)] hover:shadow-[0_0_30px_rgba(148,168,7,0.35)] transition-all transform hover:scale-[1.02] active:scale-[0.98]"
+                            >
+                                <span className="text-xs tracking-widest">GPT-4.1</span>
+                                {aiLoading ? "Analyzing..." : "Analyze Internally"}
+                            </button>
                         </div>
+                    </div>
+
+                    <div className="relative rounded-xl border border-[#94A807]/10 bg-[#0a0e05] overflow-hidden">
+                        <div className="px-5 py-3 border-b border-[#94A807]/10 flex items-center justify-between">
+                            <span className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Internal Analysis Output</span>
+                            {aiError && <span className="text-xs text-red-300">{aiError}</span>}
+                        </div>
+                        <textarea
+                            className="w-full h-56 bg-transparent text-[#d1d5db] font-mono text-sm p-5 resize-y focus:outline-none"
+                            readOnly
+                            value={aiOutput || (aiLoading ? "Analyzing with GPT-4.1..." : "No internal analysis yet.")}
+                            spellCheck={false}
+                        />
                     </div>
                 </div>
             )}
