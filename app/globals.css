@@ -1,26 +1,70 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Symbis Dark Theme Palette */
+  --bg-app: #0a0e05;
+  /* Very Dark Green/Black mix */
+  --bg-panel: #121a08;
+  /* Dark Green Surface */
+
+  /* Brand Colors */
+  --symbis-dark-green: #243305;
+  --symbis-green: #4A5B0F;
+  --symbis-light-green: #94A807;
+  --symbis-yellow: #FFEB39;
+
+  --primary: #FFEB39;
+  /* Yellow Actions */
+  --primary-fg: #243305;
+  /* Text on Yellow */
+
+  --secondary: #94A807;
+  /* Light Green Accents */
+
+  --text-main: #fcfdec;
+  /* Off-white / warm */
+  --text-muted: #a3a890;
+  /* Muted Green/Gray */
+
+  --border-subtle: rgba(148, 168, 7, 0.15);
+  --border-highlight: rgba(255, 235, 57, 0.2);
+
+  /* Glassmorphism Variables */
+  --glass-bg: rgba(36, 51, 5, 0.4);
+  --glass-border: rgba(148, 168, 7, 0.15);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@theme {
+  --font-sans: var(--font-inter);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  body {
+    background-color: var(--bg-app);
+    color: var(--text-main);
+    background-image:
+      radial-gradient(circle at 15% 50%, rgba(74, 91, 15, 0.15), transparent 35%),
+      radial-gradient(circle at 85% 30%, rgba(148, 168, 7, 0.1), transparent 35%);
+    min-height: 100vh;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Custom Scrollbar - Symbis Styled */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 168, 7, 0.2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 168, 7, 0.4);
 }
