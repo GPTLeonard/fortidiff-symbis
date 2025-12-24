@@ -41,9 +41,8 @@ export default function Home() {
       <footer className="mt-auto border-t border-[#94A807]/10 pt-6 flex justify-between items-center text-[#a3a890] text-xs font-mono">
         <div className="flex items-center gap-2">
           <Leaf size={12} className="text-[#4A5B0F]" />
-          &copy; 2025 Symbis Engineering
+          FortiDiff
         </div>
-        <div>Powered by Local Intelligence</div>
       </footer>
     </main>
   );
