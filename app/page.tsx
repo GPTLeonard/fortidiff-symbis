@@ -1,4 +1,4 @@
-import DiffWorkbench from "@/components/DiffWorkbench";
+import WorkbenchTabs from "@/components/WorkbenchTabs";
 import { ShieldCheck, Cpu, Leaf } from "lucide-react";
 
 export default function Home() {
@@ -35,7 +35,7 @@ export default function Home() {
       </header>
 
       {/* Main Workbench */}
-      <DiffWorkbench />
+      <WorkbenchTabs />
 
       {/* Footer */}
       <footer className="mt-auto border-t border-[#94A807]/10 pt-6 flex justify-between items-center text-[#a3a890] text-xs font-mono">
