@@ -20,6 +20,13 @@ export type ConfigIndex = {
   blocksByHeader: Map<string, FgBlock[]>;
 };
 
+export type ConfigHeader = {
+  model: string | null;
+  version: string | null;
+  passwordMask: boolean | null;
+  raw: string | null;
+};
+
 export function createConfigIndex(text: string): ConfigIndex {
   const lines = text.split(/\r?\n/);
   const blocks = parseBlocks(lines);
@@ -36,6 +43,38 @@ export function createConfigIndex(text: string): ConfigIndex {
     lines,
     blocks,
     blocksByHeader,
+  };
+}
+
+export function parseConfigHeader(text: string): ConfigHeader {
+  const lines = text.split(/\r?\n/);
+  const headerLine = lines.find((line) => line.startsWith("#config-version=")) ?? null;
+  const maskLine = lines.find((line) => line.startsWith("#password_mask=")) ?? null;
+
+  let model: string | null = null;
+  let version: string | null = null;
+
+  if (headerLine) {
+    const match = headerLine.match(/^#config-version=([^:-]+)-([0-9]+\\.[0-9]+\\.[0-9]+)/);
+    if (match) {
+      model = match[1] || null;
+      version = match[2] || null;
+    }
+  }
+
+  let passwordMask: boolean | null = null;
+  if (maskLine) {
+    const match = maskLine.match(/^#password_mask=(\\d+)/);
+    if (match) {
+      passwordMask = match[1] === "1";
+    }
+  }
+
+  return {
+    model,
+    version,
+    passwordMask,
+    raw: headerLine,
   };
 }
 

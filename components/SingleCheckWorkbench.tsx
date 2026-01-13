@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, FileSearch, MinusCircle } from "lucide-react";
 import { clsx } from "clsx";
 import FilePicker from "@/components/FilePicker";
 import { detectConfigDate } from "@/lib/date";
+import { parseConfigHeader } from "@/lib/fortigate";
 import { evaluateChecks } from "@/lib/fortigate-checks";
 import { detectCustomerByFilename, getCheckColumns, getRows } from "@/lib/checklist";
 
@@ -23,15 +24,6 @@ export default function SingleCheckWorkbench() {
     if (!file) return [];
     return detectCustomerByFilename(file.name);
   }, [file]);
-
-  useEffect(() => {
-    if (!file) {
-      setSelectedRowId(null);
-      return;
-    }
-    const best = matches[0]?.row;
-    setSelectedRowId(best?.rowId ?? null);
-  }, [file, matches]);
 
   const selectedRow = useMemo(() => {
     if (!selectedRowId) return null;
@@ -59,11 +51,15 @@ export default function SingleCheckWorkbench() {
   const handleFile = (text: string, name: string) => {
     const date = detectConfigDate(text, name);
     setFile({ text, name, date });
+    setSelectedRowId(null);
   };
+
+  const header = useMemo(() => (file ? parseConfigHeader(file.text) : null), [file]);
+  const versionOk = header?.version ? header.version.startsWith("7.4.") : null;
 
   const hasFile = Boolean(file);
   const hasRow = Boolean(selectedRow);
-  const autoToken = matches[0]?.token ?? null;
+  const topMatches = matches.slice(0, 3);
 
   return (
     <div className="w-full space-y-6 animate-in fade-in duration-500">
@@ -86,11 +82,15 @@ export default function SingleCheckWorkbench() {
               Single Config Checklist
             </h2>
             <p className="text-sm text-[#a3a890] mt-1">
-              {hasFile ? "Checklist vergeleken met de klant-baseline." : "Upload een configuratie om te starten."}
+              {hasRow
+                ? "Checklist vergeleken met de klant-baseline."
+                : hasFile
+                  ? "Selecteer een klant om te vergelijken."
+                  : "Upload een configuratie om te starten."}
             </p>
           </div>
 
-          {hasFile && (
+          {hasRow && (
             <div className="flex flex-wrap gap-2">
               <span className="text-xs px-3 py-1 rounded-full bg-[#243305] border border-[#94A807]/20 text-[#a3a890]">
                 Pass: {summary.pass}
@@ -111,9 +111,20 @@ export default function SingleCheckWorkbench() {
             <div className="text-sm text-[#fcfdec]">
               {hasRow ? selectedRow?.values.klant : "Geen klant geselecteerd"}
             </div>
-            {autoToken && (
-              <div className="text-xs text-[#a3a890]">
-                Automatische match op: <span className="text-[#FFEB39]">{autoToken}</span>
+            {topMatches.length > 0 && (
+              <div className="text-xs text-[#a3a890] space-y-2">
+                <div>Suggesties op basis van bestandsnaam:</div>
+                <div className="flex flex-wrap gap-2">
+                  {topMatches.map((match) => (
+                    <button
+                      key={match.row.rowId}
+                      onClick={() => setSelectedRowId(match.row.rowId)}
+                      className="px-3 py-1 rounded-full bg-[#243305]/70 border border-[#94A807]/20 text-[#fcfdec] hover:bg-[#FFEB39] hover:text-[#243305] transition"
+                    >
+                      {match.row.values.klant}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -134,6 +145,34 @@ export default function SingleCheckWorkbench() {
               ))}
             </select>
             {!hasFile && <div className="text-xs text-[#a3a890]">Upload eerst een configuratie.</div>}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Versie</div>
+            <div className="text-sm text-[#fcfdec]">
+              {header?.version ?? "Onbekend"}
+            </div>
+            {versionOk === false && (
+              <div className="text-xs text-[#FFB347]">Baseline is 7.4.x</div>
+            )}
+          </div>
+          <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Model</div>
+            <div className="text-sm text-[#fcfdec]">
+              {header?.model ?? "Onbekend"}
+            </div>
+          </div>
+          <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Password mask</div>
+            <div className="text-sm text-[#fcfdec]">
+              {header?.passwordMask === null
+                ? "Onbekend"
+                : header?.passwordMask
+                  ? "Ingeschakeld"
+                  : "Uitgeschakeld"}
+            </div>
           </div>
         </div>
 

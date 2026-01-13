@@ -3,22 +3,26 @@ import {
   type FgBlock,
   createConfigIndex,
   findBlock,
+  findBlocksByPrefix,
   findLineIndex,
   getBlockSnippet,
   makeSnippet,
   parseEdits,
+  parseConfigHeader,
 } from "@/lib/fortigate";
 
 export type CheckResult = {
   satisfied: boolean;
   evidence?: string;
   note?: string;
+  skip?: boolean;
 };
 
 export type CheckDefinition = {
   id: string;
   label: string;
   manual?: boolean;
+  manualNote?: string;
   run: (index: ConfigIndex) => CheckResult;
 };
 
@@ -46,6 +50,20 @@ const SYMBIS_OBJECT_SENTINELS = [
 ];
 
 const MANUAL_CHECKS = new Set([
+  "admin_interface_bereikbaar_vanaf_symbis_en_mgmt_servers",
+  "publieke_domein_en_uitgezonderd_van_filtering_dns_web",
+  "enforce_default_port_app_control",
+  "ssl_vpn_dns",
+  "webfilter_override",
+  "fortigate_mgmt_policy_rule",
+  "deep_inspection_uitgaand",
+  "geo_ip_blocking",
+  "certificaat_path_volledig_remote_ca_correct_installed",
+  "internet_services_policy_v4",
+  "ipsec_phase_2_op_basis_van_0_0_0_0_0_routes",
+  "ssl_vpn_password_safe_off",
+  "interface_alias_ingevuld",
+  "estimated_bandwidth_wan",
   "dns_service_on_interface_staat_voor_guest_naar_system_dns",
   "interne_zone_uitgezonderd_in_het_dns_filter",
   "alle_firewall_policys_0_bytes_controle",
@@ -56,10 +74,55 @@ const MANUAL_CHECKS = new Set([
   "malicious_block_op_vips_v3",
   "alle_certificaten_zijn_geldig_valid",
   "devices_in_fabric_zijn_registered",
-  "workflow_management_ingeschakeld",
   "itboost_bijgewerkt",
   "bitwarden_bijgewerkt_en_opgeschoond",
 ]);
+
+const MANUAL_NOTES: Record<string, string> = {
+  internet_services_policy_v4: "Check verwijderd",
+  ipsec_phase_2_op_basis_van_0_0_0_0_0_routes: "Check verwijderd",
+  ssl_vpn_password_safe_off: "Check verwijderd",
+  interface_alias_ingevuld: "Check verwijderd",
+};
+
+const IGNORE_WHEN_EMPTY = new Set(["firewall_policys_logtraffic_start_disabled"]);
+
+function normalizeModelName(model: string | null) {
+  if (!model) return null;
+  return model.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^FGT/, "FG");
+}
+
+const LOW_END_MODELS = new Set(
+  [
+    "FG-40F",
+    "FG-40F-3G4G",
+    "FG-50G",
+    "FG-50G-5G",
+    "FG-50G-DSL",
+    "FG-50G-SFP",
+    "FG-50G-SFP-POE",
+    "FG-51G",
+    "FG-51G-5G",
+    "FG-51G-SFP-POE",
+    "FG-60E",
+    "FG-60E-DSL",
+    "FG-60E-POE",
+    "FG-60F",
+    "FG-61E",
+    "FG-61F",
+    "FG-70F",
+    "FG-70G-POE",
+    "FG-71F",
+    "FG-71G",
+    "FG-71G-POE",
+    "FG-80E",
+    "FG-80E-POE",
+    "FG-81E",
+    "FG-81E-POE",
+    "FG-90E",
+    "FG-91E",
+  ].map((model) => normalizeModelName(model) as string)
+);
 
 function findFirstMatch(index: ConfigIndex, matcher: RegExp): Match | null {
   const idx = findLineIndex(index.lines, matcher);
@@ -92,6 +155,15 @@ function getPolicyBlock(index: ConfigIndex): FgBlock | null {
 
 function getLocalInBlock(index: ConfigIndex): FgBlock | null {
   return findBlock(index, "config firewall local-in-policy");
+}
+
+function isHaConfigured(block: FgBlock | null): boolean {
+  if (!block) return false;
+  const lines = block.lines
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("set "));
+  const meaningful = lines.filter((line) => !line.startsWith("set override "));
+  return meaningful.length > 0;
 }
 
 function parseInterfaceEdits(index: ConfigIndex): ReturnType<typeof parseEdits> {
@@ -193,9 +265,15 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "Auto firmware upgrade",
     run: (index) => {
       const block = findBlock(index, "config system fortiguard");
-      const match = findInBlock(index, block, /set auto-firmware-upgrade enable/i);
+      if (!block) return { satisfied: false };
+      const text = block.lines.join("\n").toLowerCase();
+      const hasSchedule =
+        text.includes("auto-firmware-upgrade-start-hour") &&
+        text.includes("auto-firmware-upgrade-end-hour");
+      const hasDelay = text.includes("auto-firmware-upgrade-delay");
+      const hasEnable = text.includes("auto-firmware-upgrade enable");
       return {
-        satisfied: !!match,
+        satisfied: hasSchedule && (hasDelay || hasEnable),
         evidence: getBlockSnippet(index, block),
       };
     },
@@ -205,6 +283,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "HA session pickup",
     run: (index) => {
       const block = findBlock(index, "config system ha");
+      if (!isHaConfigured(block)) {
+        return { satisfied: false, skip: true, note: "Geen HA-config" };
+      }
       const match = findInBlock(index, block, /set session-pickup(-connectionless)? enable/i);
       return {
         satisfied: !!match,
@@ -217,7 +298,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "Geen veschil in HA Device priority",
     run: (index) => {
       const block = findBlock(index, "config system ha");
-      if (!block) return { satisfied: true };
+      if (!block || !isHaConfigured(block)) {
+        return { satisfied: false, skip: true, note: "Geen HA-config" };
+      }
       const hasPriority = /set priority\s+/i.test(block.lines.join("\n"));
       return {
         satisfied: !hasPriority,
@@ -266,16 +349,21 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "ipsec_minimaal_op_basis_van_aes256gcm_prfsha384_en_dh_20",
     label: "IPsec minimaal op basis van AES256GCM-PRFSHA384 en DH 20",
     run: (index) => {
-      const block = findBlock(index, "config vpn ipsec phase1-interface");
-      if (!block) return { satisfied: false };
-      const entries = parseEdits(block);
-      for (const entry of entries) {
-        const text = entry.lines.join("\n").toLowerCase();
-        if (text.includes("aes256gcm-prfsha384") && text.includes("set dhgrp 20")) {
-          return { satisfied: true, evidence: entry.lines.join("\n") };
+      const blocks = findBlocksByPrefix(index, "config vpn ipsec phase1");
+      if (blocks.length === 0) return { satisfied: false };
+      for (const block of blocks) {
+        const entries = parseEdits(block);
+        for (const entry of entries) {
+          const text = entry.lines.join("\n").toLowerCase();
+          if (text.includes("aes256gcm-prfsha384") && text.includes("set dhgrp 20")) {
+            return { satisfied: true, evidence: entry.lines.join("\n") };
+          }
         }
       }
-      return { satisfied: false, evidence: getBlockSnippet(index, block) };
+      const fallbackBlock = blocks[0];
+      const fallbackEntries = parseEdits(fallbackBlock);
+      const evidence = fallbackEntries.length > 0 ? fallbackEntries[0].lines.join("\n") : getBlockSnippet(index, fallbackBlock);
+      return { satisfied: false, evidence };
     },
   },
   ipsec_phase_2_op_basis_van_0_0_0_0_0_routes: {
@@ -352,15 +440,20 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "Uitsluitend LDAPS gebruik",
     run: (index) => {
       const block = findBlock(index, "config user ldap");
-      if (!block) return { satisfied: false };
+      if (!block) return { satisfied: true };
       const entries = parseEdits(block);
-      if (entries.length === 0) return { satisfied: false, evidence: getBlockSnippet(index, block) };
+      if (entries.length === 0) return { satisfied: true, evidence: getBlockSnippet(index, block) };
       for (const entry of entries) {
         const text = entry.lines.join("\n").toLowerCase();
-        const hasLdaps = text.includes("set secure ldaps") || text.includes("ldaps://") || text.includes("set port 636");
-        if (!hasLdaps) {
+        if (text.includes("set server-identity-check disable")) {
           return { satisfied: false, evidence: entry.lines.join("\n") };
         }
+        const hasSecure =
+          text.includes("set secure ldaps") ||
+          text.includes("set secure starttls") ||
+          text.includes("ldaps://") ||
+          text.includes("set port 636");
+        if (!hasSecure) return { satisfied: false, evidence: entry.lines.join("\n") };
       }
       return { satisfied: true, evidence: getBlockSnippet(index, block) };
     },
@@ -370,12 +463,12 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "Uitsluitend RADIUS MS-CHAP-v2",
     run: (index) => {
       const block = findBlock(index, "config user radius");
-      if (!block) return { satisfied: false };
+      if (!block) return { satisfied: true };
       const entries = parseEdits(block);
-      if (entries.length === 0) return { satisfied: false, evidence: getBlockSnippet(index, block) };
+      if (entries.length === 0) return { satisfied: true, evidence: getBlockSnippet(index, block) };
       for (const entry of entries) {
         const text = entry.lines.join("\n").toLowerCase();
-        if (!text.includes("set auth-type mschapv2")) {
+        if (!text.includes("set auth-type ms_chap_v2") && !text.includes("set auth-type mschapv2")) {
           return { satisfied: false, evidence: entry.lines.join("\n") };
         }
       }
@@ -484,6 +577,15 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "op_2gb_models_ips_cp_accel_mode_none",
     label: "Op 2GB models IPS cp-accel-mode none",
     run: (index) => {
+      const header = parseConfigHeader(index.text);
+      const normalizedModel = normalizeModelName(header.model);
+      if (!normalizedModel || !LOW_END_MODELS.has(normalizedModel)) {
+        return {
+          satisfied: false,
+          skip: true,
+          note: normalizedModel ? `Niet 2GB model (${normalizedModel})` : "Model onbekend",
+        };
+      }
       const block = findBlock(index, "config ips global");
       const match = findInBlock(index, block, /set cp-accel-mode none/i);
       return {
@@ -496,12 +598,26 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "all_service_wordt_niet_gebruikt_in_firewall_policys",
     label: "ALL service wordt niet gebruikt in firewall policys",
     run: (index) => {
-      const block = getPolicyBlock(index);
-      if (!block) return { satisfied: true };
-      const lineMatch = findInBlock(index, block, /set service .*\\bALL\\b/i);
+      const entries = parseFirewallPolicyEdits(index);
+      const offenders = entries.filter((entry) => {
+        const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
+        const isDeny = actionLine?.toLowerCase().includes("deny");
+        if (isDeny) return false;
+        const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
+        if (!serviceLine) return false;
+        const tokens = parseServiceTokens(serviceLine).map((token) => token.toUpperCase());
+        return tokens.includes("ALL");
+      });
+
+      if (offenders.length === 0) {
+        return { satisfied: true, evidence: getBlockSnippet(index, getPolicyBlock(index)) };
+      }
+
+      const preview = offenders.slice(0, 3).map((entry) => entry.lines.join("\n")).join("\n\n");
+      const evidence = [`ALL accept policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
       return {
-        satisfied: !lineMatch,
-        evidence: getBlockSnippet(index, block),
+        satisfied: false,
+        evidence,
       };
     },
   },
@@ -539,8 +655,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
         const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
         if (serviceLine) {
           const tokens = parseServiceTokens(serviceLine);
-          if (tokens.length > 1) {
-            return { satisfied: false, evidence: entry.lines.join("\n") };
+          if (tokens.length > 7) {
+            const evidence = `Services count: ${tokens.length}\n${entry.lines.join("\n")}`;
+            return { satisfied: false, evidence };
           }
         }
       }
@@ -578,6 +695,18 @@ export const CHECKS: Record<string, CheckDefinition> = {
     run: (index) => {
       const block = findBlock(index, "config system global");
       const match = findInBlock(index, block, /set revision-backup-on-logout enable/i);
+      return {
+        satisfied: !!match,
+        evidence: getBlockSnippet(index, block),
+      };
+    },
+  },
+  workflow_management_ingeschakeld: {
+    id: "workflow_management_ingeschakeld",
+    label: "Workflow Management ingeschakeld",
+    run: (index) => {
+      const block = findBlock(index, "config system global");
+      const match = findInBlock(index, block, /set gui-workflow-management enable/i);
       return {
         satisfied: !!match,
         evidence: getBlockSnippet(index, block),
@@ -761,6 +890,11 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "default_route_is_sd_wan_zone",
     label: "Default route is SD-WAN zone",
     run: (index) => {
+      const sdwan = findBlock(index, "config system sdwan");
+      const sdwanEnabled = sdwan ? sdwan.lines.join("\n").toLowerCase().includes("set status enable") : false;
+      if (!sdwanEnabled) {
+        return { satisfied: false, skip: true, note: "SD-WAN niet actief" };
+      }
       const block = findBlock(index, "config router static");
       const match = findInBlock(index, block, /set device \"virtual-wan-link\"/i);
       return {
@@ -775,7 +909,7 @@ export const CHECKS: Record<string, CheckDefinition> = {
     run: (index) => {
       const match = findFirstMatch(index, /set match-vip enable/i);
       return {
-        satisfied: !!match,
+        satisfied: !match,
         evidence: match?.snippet,
       };
     },
@@ -784,11 +918,19 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "uitgaande_malicious_block_v2",
     label: "Uitgaande malicious block v2",
     run: (index) => {
-      const text = index.textLower;
-      const hasAny = TOKEN_MATCHES.some((token) => text.includes(token));
+      const entries = parseFirewallPolicyEdits(index);
+      const matches = entries.filter((entry) => {
+        const text = entry.lines.join("\n").toLowerCase();
+        if (!text.includes("internet-service-name")) return false;
+        return TOKEN_MATCHES.some((token) => text.includes(token));
+      });
+      if (matches.length === 0) {
+        return { satisfied: false };
+      }
+      const preview = matches.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
       return {
-        satisfied: hasAny,
-        evidence: "",
+        satisfied: true,
+        evidence: preview,
       };
     },
   },
@@ -869,9 +1011,22 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "Symbis certificate-inspection",
     run: (index) => {
       const block = findBlock(index, "config firewall ssl-ssh-profile");
-      const match = blockHasTokens(block, ['edit "symbis-certificate-inspection"']);
+      const hasSymbisProfile = blockHasTokens(block, ['edit "symbis-certificate-inspection"']);
+
+      const offenders = parseFirewallPolicyEdits(index).filter((entry) => {
+        const profileLine = entry.lines.find((line) => line.trim().startsWith("set ssl-ssh-profile"));
+        if (!profileLine) return false;
+        const lower = profileLine.toLowerCase();
+        return lower.includes("certificate-inspection") && !lower.includes("symbis-certificate-inspection");
+      });
+
+      if (offenders.length > 0) {
+        const preview = offenders.slice(0, 3).map((entry) => entry.lines.join("\n")).join("\n\n");
+        return { satisfied: false, evidence: preview };
+      }
+
       return {
-        satisfied: match,
+        satisfied: hasSymbisProfile,
         evidence: getBlockSnippet(index, block),
       };
     },
@@ -969,7 +1124,13 @@ export const CHECKS: Record<string, CheckDefinition> = {
       const block = findBlock(index, "config system central-management");
       if (!block) return { satisfied: false };
       const text = block.lines.join("\n").toLowerCase();
-      const enabled = text.includes("set type") && !text.includes("set type none");
+      const hasType =
+        text.includes("set type fortiguard") ||
+        text.includes("set type fortimanager") ||
+        text.includes("set type forticloud") ||
+        text.includes("set type faz") ||
+        text.includes("set type fmg");
+      const enabled = hasType && !text.includes("set type none");
       return {
         satisfied: enabled,
         evidence: getBlockSnippet(index, block),
@@ -1010,16 +1171,17 @@ export const CHECKS: Record<string, CheckDefinition> = {
 };
 
 export function getCheckDefinition(id: string): CheckDefinition | null {
-  const check = CHECKS[id];
-  if (check) return check;
   if (MANUAL_CHECKS.has(id)) {
     return {
       id,
       label: id,
       manual: true,
+      manualNote: MANUAL_NOTES[id] ?? "Handmatig controleren",
       run: () => ({ satisfied: false }),
     };
   }
+  const check = CHECKS[id];
+  if (check) return check;
   return null;
 }
 
@@ -1041,6 +1203,17 @@ export function evaluateChecks(
         expectedNormalized.startsWith("x ") ||
         expectedNormalized.startsWith("x(");
       const def = getCheckDefinition(col.id);
+      if (!expected && IGNORE_WHEN_EMPTY.has(col.id)) {
+        return {
+          id: col.id,
+          label: col.label,
+          expected,
+          status: "manual",
+          satisfied: false,
+          evidence: "",
+          note: "Baseline leeg - check overgeslagen",
+        };
+      }
       if (!def || def.manual) {
         return {
           id: col.id,
@@ -1049,11 +1222,22 @@ export function evaluateChecks(
           status: "manual",
           satisfied: false,
           evidence: "",
-          note: def?.manual ? "Handmatig controleren" : "Geen check gedefinieerd",
+          note: def?.manual ? def.manualNote ?? "Handmatig controleren" : "Geen check gedefinieerd",
         };
       }
 
       const result = def.run(index);
+      if (result.skip) {
+        return {
+          id: col.id,
+          label: col.label,
+          expected,
+          status: "manual",
+          satisfied: false,
+          evidence: result.evidence ?? "",
+          note: result.note ?? "Overgeslagen",
+        };
+      }
       const matches = expectSatisfied ? result.satisfied : !result.satisfied;
       return {
         id: col.id,
