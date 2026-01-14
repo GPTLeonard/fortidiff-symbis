@@ -1,4 +1,4 @@
-import { createTwoFilesPatch, parsePatch, diffLines, Change } from "diff";
+import { createTwoFilesPatch, parsePatch, diffLines } from "diff";
 
 export type ExtractedDiff = {
     unifiedDiff: string;
@@ -85,7 +85,6 @@ export function extractDiff(oldText: string, newText: string): ExtractedDiff {
  */
 export function generateContextualDiff(oldText: string, newText: string): string {
     const differences = diffLines(oldText, newText);
-    const lines: string[] = [];
 
     // We basically want to walk the diff, and whenever we hit a change,
     // we assume the "New" version of the block is the authority for context,
@@ -141,7 +140,6 @@ export function generateContextualDiff(oldText: string, newText: string): string
     // AND keep all siblings in the immediate parent block (user request: "Alles tussen config en end").
 
     const linesToKeep = new Set<number>();
-    const stack: { lineIndex: number, indent: number }[] = [];
 
     // Helper to add a range to keep
     const keepRange = (start: number, end: number) => {
@@ -278,7 +276,6 @@ export function optimizeDiffForAI(diffText: string): string {
         // 1. Truncate Encrypted Passwords & Secrets (Broad match for Fortinet secrets)
         // Matches 'set password ENC ...', 'set passphrase ENC ...', 'set fixed-key ENC ...'
         if (line.match(/set (?:password|passwd|enc-password|scrt-enc|fixed-key|passphrase|private-key|ca|crl) ENC /)) {
-            const parts = line.split(" ENC ");
             const indent = line.substring(0, line.indexOf("set"));
             // Deduplicate consecutive secret truncations
             const lastLine = optimized[optimized.length - 1];

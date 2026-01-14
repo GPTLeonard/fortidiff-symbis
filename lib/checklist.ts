@@ -4,6 +4,13 @@ export type ChecklistColumn = (typeof checklistColumns)[number];
 export type ChecklistRow = (typeof checklistRows)[number];
 
 const columnById = new Map(checklistColumns.map((col) => [col.id, col]));
+const HIDDEN_CHECKS = new Set([
+  "internet_services_policy_v4",
+  "ipsec_phase_2_op_basis_van_0_0_0_0_0_routes",
+  "ssl_vpn_password_safe_off",
+  "interface_alias_ingevuld",
+  "standaard_objecten_aanwezig_v29",
+]);
 
 export function getColumnById(id: ChecklistColumn["id"]) {
   return columnById.get(id) ?? null;
@@ -14,7 +21,7 @@ export function getMetadataColumns() {
 }
 
 export function getCheckColumns() {
-  return checklistColumns.filter((col) => col.isCheck);
+  return checklistColumns.filter((col) => col.isCheck && !HIDDEN_CHECKS.has(col.id));
 }
 
 export function getRows() {

@@ -48,14 +48,34 @@ export function createConfigIndex(text: string): ConfigIndex {
 
 export function parseConfigHeader(text: string): ConfigHeader {
   const lines = text.split(/\r?\n/);
-  const headerLine = lines.find((line) => line.startsWith("#config-version=")) ?? null;
-  const maskLine = lines.find((line) => line.startsWith("#password_mask=")) ?? null;
+  const headerMatch = text.match(/#config-version=([^:-\s]+)-([0-9]+\.[0-9]+(?:\.[0-9]+)?)/);
+  const maskMatch = text.match(/#password_mask\s*=\s*(\d+)/);
+
+  let headerLine: string | null = headerMatch ? headerMatch[0] : null;
+  let maskLine: string | null = maskMatch ? maskMatch[0] : null;
+
+  if (!headerLine || !maskLine) {
+    for (const line of lines) {
+      const cleaned = line.replace(/^\uFEFF/, "").trim();
+      if (!headerLine && cleaned.includes("#config-version=")) {
+        headerLine = cleaned;
+      }
+      if (!maskLine && cleaned.includes("#password_mask=")) {
+        maskLine = cleaned;
+      }
+      if (headerLine && maskLine) break;
+    }
+  }
 
   let model: string | null = null;
   let version: string | null = null;
 
-  if (headerLine) {
-    const match = headerLine.match(/^#config-version=([^:-]+)-([0-9]+\\.[0-9]+\\.[0-9]+)/);
+  if (headerMatch) {
+    model = headerMatch[1] || null;
+    version = headerMatch[2] || null;
+  } else if (headerLine) {
+    const trimmed = headerLine.replace(/^\uFEFF/, "").trim();
+    const match = trimmed.match(/#config-version=([^:-]+)-([0-9]+\.[0-9]+(?:\.[0-9]+)?)/);
     if (match) {
       model = match[1] || null;
       version = match[2] || null;
@@ -63,8 +83,11 @@ export function parseConfigHeader(text: string): ConfigHeader {
   }
 
   let passwordMask: boolean | null = null;
-  if (maskLine) {
-    const match = maskLine.match(/^#password_mask=(\\d+)/);
+  if (maskMatch) {
+    passwordMask = maskMatch[1] === "1";
+  } else if (maskLine) {
+    const trimmed = maskLine.replace(/^\uFEFF/, "").trim();
+    const match = trimmed.match(/#password_mask\s*=\s*(\d+)/);
     if (match) {
       passwordMask = match[1] === "1";
     }

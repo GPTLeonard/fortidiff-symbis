@@ -30,10 +30,35 @@ export default function SingleCheckWorkbench() {
     return rows.find((row) => row.rowId === selectedRowId) ?? null;
   }, [rows, selectedRowId]);
 
+  const header = useMemo(() => (file ? parseConfigHeader(file.text) : null), [file]);
+  const versionBelowRecommended = (() => {
+    if (!header?.version) return null;
+    const parts = header.version.split(".").map((part) => Number(part));
+    if (parts.some((part) => Number.isNaN(part))) return null;
+    const [major = 0, minor = 0, patch = 0] = parts;
+    if (major !== 7) return major < 7;
+    if (minor !== 4) return minor < 4;
+    return patch < 0;
+  })();
+  const hasValidVersion = Boolean(header?.version);
+  const hasPasswordMask = header?.passwordMask === true;
+  const canProceed = Boolean(file && hasValidVersion && hasPasswordMask);
+  const blockingIssues = useMemo(() => {
+    if (!file) return [];
+    const issues: string[] = [];
+    if (!hasValidVersion) {
+      issues.push("Firmware versie ontbreekt in de header (#config-version=...).");
+    }
+    if (!hasPasswordMask) {
+      issues.push("Dude geen wachtwoorden erin");
+    }
+    return issues;
+  }, [file, hasPasswordMask, hasValidVersion]);
+
   const results = useMemo(() => {
-    if (!file || !selectedRow) return [];
+    if (!file || !selectedRow || !canProceed) return [];
     return evaluateChecks(file.text, checkColumns, selectedRow.values);
-  }, [file, selectedRow, checkColumns]);
+  }, [file, selectedRow, checkColumns, canProceed]);
 
   const summary = useMemo(() => {
     const pass = results.filter((item) => item.status === "pass").length;
@@ -54,9 +79,6 @@ export default function SingleCheckWorkbench() {
     setSelectedRowId(null);
   };
 
-  const header = useMemo(() => (file ? parseConfigHeader(file.text) : null), [file]);
-  const versionOk = header?.version ? header.version.startsWith("7.4.") : null;
-
   const hasFile = Boolean(file);
   const hasRow = Boolean(selectedRow);
   const topMatches = matches.slice(0, 3);
@@ -66,7 +88,7 @@ export default function SingleCheckWorkbench() {
       <div className="grid grid-cols-1 gap-4">
         <FilePicker
           label="Single Configuration"
-          hint="Upload 1 FortiGate .conf"
+          hint="Upload 1 FortiGate .conf of .yaml"
           filename={file?.name ?? null}
           detectedIso={file?.date.iso ?? null}
           detectedSource={file?.date.source ?? null}
@@ -85,7 +107,9 @@ export default function SingleCheckWorkbench() {
               {hasRow
                 ? "Checklist vergeleken met de klant-baseline."
                 : hasFile
-                  ? "Selecteer een klant om te vergelijken."
+                  ? canProceed
+                    ? "Selecteer een klant om te vergelijken."
+                    : "Header ontbreekt of password mask uitgeschakeld."
                   : "Upload een configuratie om te starten."}
             </p>
           </div>
@@ -119,7 +143,13 @@ export default function SingleCheckWorkbench() {
                     <button
                       key={match.row.rowId}
                       onClick={() => setSelectedRowId(match.row.rowId)}
-                      className="px-3 py-1 rounded-full bg-[#243305]/70 border border-[#94A807]/20 text-[#fcfdec] hover:bg-[#FFEB39] hover:text-[#243305] transition"
+                      disabled={!canProceed}
+                      className={clsx(
+                        "px-3 py-1 rounded-full border text-[#fcfdec] transition",
+                        canProceed
+                          ? "bg-[#243305]/70 border-[#94A807]/20 hover:bg-[#FFEB39] hover:text-[#243305]"
+                          : "bg-[#243305]/30 border-[#94A807]/10 text-[#a3a890] cursor-not-allowed"
+                      )}
                     >
                       {match.row.values.klant}
                     </button>
@@ -135,7 +165,7 @@ export default function SingleCheckWorkbench() {
               className="w-full bg-[#121a08] border border-[#94A807]/20 rounded-lg px-3 py-2 text-sm text-[#fcfdec]"
               value={selectedRowId ?? ""}
               onChange={(event) => setSelectedRowId(event.target.value || null)}
-              disabled={!hasFile}
+              disabled={!hasFile || !canProceed}
             >
               <option value="">Selecteer klant...</option>
               {rows.map((row) => (
@@ -145,6 +175,9 @@ export default function SingleCheckWorkbench() {
               ))}
             </select>
             {!hasFile && <div className="text-xs text-[#a3a890]">Upload eerst een configuratie.</div>}
+            {hasFile && !canProceed && (
+              <div className="text-xs text-[#FFB347]">Header ontbreekt of password mask is uit.</div>
+            )}
           </div>
         </div>
 
@@ -154,8 +187,10 @@ export default function SingleCheckWorkbench() {
             <div className="text-sm text-[#fcfdec]">
               {header?.version ?? "Onbekend"}
             </div>
-            {versionOk === false && (
-              <div className="text-xs text-[#FFB347]">Baseline is 7.4.x</div>
+            {versionBelowRecommended === true && (
+              <div className="text-xs text-[#FFB347]">
+                Let op: firmwareversie wijkt af van de geadviseerde versie.
+              </div>
             )}
           </div>
           <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
@@ -173,10 +208,21 @@ export default function SingleCheckWorkbench() {
                   ? "Ingeschakeld"
                   : "Uitgeschakeld"}
             </div>
+            {!hasPasswordMask && hasFile && (
+              <div className="text-xs text-[#FFB347]">Dude geen wachtwoorden erin</div>
+            )}
           </div>
         </div>
 
-        {hasRow && (
+        {blockingIssues.length > 0 && (
+          <div className="rounded-xl border border-[#FFB347]/30 bg-[#2a1208]/50 px-4 py-3 text-xs text-[#FFB347] space-y-1">
+            {blockingIssues.map((issue) => (
+              <div key={issue}>{issue}</div>
+            ))}
+          </div>
+        )}
+
+        {hasRow && canProceed && (
           <div className="flex flex-wrap gap-2">
             {(
               [
@@ -211,7 +257,11 @@ export default function SingleCheckWorkbench() {
           <div className="max-h-[520px] overflow-auto divide-y divide-[#94A807]/10">
             {visibleResults.length === 0 && (
               <div className="p-6 text-sm text-[#a3a890]">
-                {hasFile && hasRow ? "Geen checks in deze filter." : "Upload een bestand en kies een klant."}
+                {hasFile && !canProceed
+                  ? "Header ontbreekt of password mask is uitgeschakeld."
+                  : hasFile && hasRow
+                    ? "Geen checks in deze filter."
+                    : "Upload een bestand en kies een klant."}
               </div>
             )}
             {visibleResults.map((item) => (

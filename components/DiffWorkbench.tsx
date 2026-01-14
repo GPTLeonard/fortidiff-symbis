@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import FilePicker from "@/components/FilePicker";
-import { type ExtractedDiff, extractDiff, optimizeDiffForAI, generateContextualDiff } from "@/lib/diff";
+import { type ExtractedDiff, extractDiff, optimizeDiffForAI } from "@/lib/diff";
 import { type DetectedDate, detectConfigDate } from "@/lib/date";
 import { copyToClipboard, downloadText } from "@/lib/download";
 import { ArrowLeftRight, Copy, Download, FileJson, FileText, Split, Terminal } from "lucide-react";
@@ -27,6 +27,11 @@ const DiffEditor = dynamic(
 );
 
 type FileState = { text: string; name: string; date: DetectedDate } | null;
+const OUTPUT_TABS = [
+    { id: "changes", label: "Contextual Changes", icon: FileText },
+    { id: "unified", label: "Unified Diff", icon: Split },
+    { id: "json", label: "JSON Structure", icon: FileJson },
+] as const;
 
 export default function DiffWorkbench() {
     const [oldFile, setOldFile] = useState<FileState>(null);
@@ -285,14 +290,10 @@ ${diffContent}`;
                         </div>
 
                         <div className="flex gap-2 bg-[#0a0e05]/60 p-1.5 rounded-lg border border-[#94A807]/10">
-                            {[
-                                { id: "changes", label: "Contextual Changes", icon: FileText },
-                                { id: "unified", label: "Unified Diff", icon: Split },
-                                { id: "json", label: "JSON Structure", icon: FileJson },
-                            ].map((tab) => (
+                            {OUTPUT_TABS.map((tab) => (
                                 <button
                                     key={tab.id}
-                                    onClick={() => setActiveOutput(tab.id as any)}
+                                    onClick={() => setActiveOutput(tab.id)}
                                     className={clsx(
                                         "flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-300",
                                         activeOutput === tab.id

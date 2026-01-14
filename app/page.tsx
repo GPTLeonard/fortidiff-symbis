@@ -29,7 +29,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#243305] border border-[#94A807]/10">
             <Cpu size={14} className="text-[#a3a890]" />
-            <span className="text-xs font-mono text-[#a3a890]">v1.1.0</span>
+            <span className="text-xs font-mono text-[#a3a890]">v1.5.1</span>
           </div>
         </div>
       </header>

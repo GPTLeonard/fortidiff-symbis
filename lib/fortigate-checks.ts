@@ -31,15 +31,15 @@ type Match = {
   snippet: string;
 };
 
-const TOKEN_MATCHES = [
-  "botnet-c&c.server",
-  "hosting-bulletproof.hosting",
-  "malicious-malicious.server",
-  "phishing-phishing.server",
-  "proxy-proxy.server",
-  "tor-exit.node",
-  "tor-relay.node",
-  "vpn-anonymous.vpn",
+const REQUIRED_MALICIOUS_SERVICES = [
+  "Botnet-C&C.Server",
+  "Hosting-Bulletproof.Hosting",
+  "Malicious-Malicious.Server",
+  "Phishing-Phishing.Server",
+  "Proxy-Proxy.Server",
+  "Tor-Exit.Node",
+  "Tor-Relay.Node",
+  "VPN-Anonymous.VPN",
 ];
 
 const SYMBIS_OBJECT_SENTINELS = [
@@ -49,9 +49,17 @@ const SYMBIS_OBJECT_SENTINELS = [
   'edit "s-qualys_ssl_labs"',
 ];
 
+const SYMBIS_ENTRA_TENANT_ID = "4f4b99f3-8fde-4ffa-8989-04680bb56aa7";
+const SYMBIS_ENTRA_ENTITY_ID = `https://sts.windows.net/${SYMBIS_ENTRA_TENANT_ID}/`;
+
+const ALLOWED_WEBFILTER_PROFILES = new Set(["symbis", "symbis-monitor"]);
+const ALLOWED_APPLICATION_LISTS = new Set(["symbis", "symbis-default-port", "symbis-monitor"]);
+const ALLOWED_SSL_SSH_PROFILES = new Set(["symbis-certificate-inspection"]);
+
 const MANUAL_CHECKS = new Set([
   "admin_interface_bereikbaar_vanaf_symbis_en_mgmt_servers",
   "publieke_domein_en_uitgezonderd_van_filtering_dns_web",
+  "fortigate_primaire_dns_server",
   "enforce_default_port_app_control",
   "ssl_vpn_dns",
   "webfilter_override",
@@ -62,13 +70,16 @@ const MANUAL_CHECKS = new Set([
   "internet_services_policy_v4",
   "ipsec_phase_2_op_basis_van_0_0_0_0_0_routes",
   "ssl_vpn_password_safe_off",
+  "ssl_vpn_geldig_certificaat",
   "interface_alias_ingevuld",
   "estimated_bandwidth_wan",
   "dns_service_on_interface_staat_voor_guest_naar_system_dns",
   "interne_zone_uitgezonderd_in_het_dns_filter",
   "alle_firewall_policys_0_bytes_controle",
   "implicit_deny_dns_ntp_en_utm_log_gecontroleerd",
-  "all_service_is_rood",
+  "symbis_objecten_toegepast_waar_mogelijk",
+  "administrative_access_less_is_more",
+  "standaard_objecten_aanwezig_v29",
   "naamgeving_policys",
   "server_protecting_actief_op_vips",
   "malicious_block_op_vips_v3",
@@ -83,6 +94,7 @@ const MANUAL_NOTES: Record<string, string> = {
   ipsec_phase_2_op_basis_van_0_0_0_0_0_routes: "Check verwijderd",
   ssl_vpn_password_safe_off: "Check verwijderd",
   interface_alias_ingevuld: "Check verwijderd",
+  standaard_objecten_aanwezig_v29: "Check verwijderd",
 };
 
 const IGNORE_WHEN_EMPTY = new Set(["firewall_policys_logtraffic_start_disabled"]);
@@ -174,12 +186,6 @@ function parseInterfaceEdits(index: ConfigIndex): ReturnType<typeof parseEdits> 
 
 function parseFirewallPolicyEdits(index: ConfigIndex): ReturnType<typeof parseEdits> {
   const block = getPolicyBlock(index);
-  if (!block) return [];
-  return parseEdits(block);
-}
-
-function parseLocalInEdits(index: ConfigIndex): ReturnType<typeof parseEdits> {
-  const block = getLocalInBlock(index);
   if (!block) return [];
   return parseEdits(block);
 }
@@ -351,18 +357,29 @@ export const CHECKS: Record<string, CheckDefinition> = {
     run: (index) => {
       const blocks = findBlocksByPrefix(index, "config vpn ipsec phase1");
       if (blocks.length === 0) return { satisfied: false };
+      const offenders: string[] = [];
+      let total = 0;
       for (const block of blocks) {
         const entries = parseEdits(block);
         for (const entry of entries) {
+          total += 1;
           const text = entry.lines.join("\n").toLowerCase();
-          if (text.includes("aes256gcm-prfsha384") && text.includes("set dhgrp 20")) {
-            return { satisfied: true, evidence: entry.lines.join("\n") };
+          const hasProposal = text.includes("aes256gcm-prfsha384");
+          const dhLine = entry.lines.find((line) => line.trim().startsWith("set dhgrp"));
+          const hasDh20 = dhLine ? /\b20\b/.test(dhLine) : false;
+          if (!hasProposal || !hasDh20) {
+            offenders.push(entry.lines.join("\n"));
           }
         }
       }
-      const fallbackBlock = blocks[0];
-      const fallbackEntries = parseEdits(fallbackBlock);
-      const evidence = fallbackEntries.length > 0 ? fallbackEntries[0].lines.join("\n") : getBlockSnippet(index, fallbackBlock);
+      if (total === 0) {
+        return { satisfied: false, evidence: getBlockSnippet(index, blocks[0]) };
+      }
+      if (offenders.length === 0) {
+        return { satisfied: true, evidence: total ? `Alle ${total} IPsec phase1 entries voldoen.` : "" };
+      }
+      const preview = offenders.slice(0, 2).join("\n\n");
+      const evidence = [`Afwijkingen: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
       return { satisfied: false, evidence };
     },
   },
@@ -386,11 +403,71 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "IPsec Static Blackhole routes",
     run: (index) => {
       const block = findBlock(index, "config router static");
-      const match = findInBlock(index, block, /set blackhole enable/i);
-      return {
-        satisfied: !!match,
-        evidence: getBlockSnippet(index, block),
+      if (!block) return { satisfied: false };
+      const entries = parseEdits(block);
+      if (entries.length === 0) return { satisfied: false, evidence: getBlockSnippet(index, block) };
+
+      const blackholeByDst = new Map<string, boolean>();
+      const badBlackholes: string[] = [];
+
+      const getDst = (lines: string[]) => {
+        const dstLine = lines.find((line) => line.trim().startsWith("set dstaddr")) ??
+          lines.find((line) => line.trim().startsWith("set dst "));
+        if (!dstLine) return null;
+        return dstLine.split(/\s+/).slice(2).join(" ").replace(/\"/g, "").trim();
       };
+
+      const isSdwan = (lines: string[]) =>
+        lines.some((line) => line.toLowerCase().includes('set sdwan-zone "virtual-wan-link"'));
+
+      const getDistance = (lines: string[]) => {
+        const line = lines.find((item) => item.trim().startsWith("set distance"));
+        if (!line) return null;
+        const value = Number(line.trim().split(/\s+/).pop());
+        return Number.isFinite(value) ? value : null;
+      };
+
+      const isBlackhole = (lines: string[]) =>
+        lines.some((line) => line.toLowerCase().includes("set blackhole enable"));
+
+      for (const entry of entries) {
+        const dst = getDst(entry.lines);
+        if (!dst) continue;
+        if (isBlackhole(entry.lines)) {
+          const distance = getDistance(entry.lines);
+          if (distance === 254) {
+            blackholeByDst.set(dst, true);
+          } else {
+            badBlackholes.push(entry.lines.join("\n"));
+          }
+        }
+      }
+
+      const missing: string[] = [];
+      for (const entry of entries) {
+        const dst = getDst(entry.lines);
+        if (!dst) continue;
+        if (isSdwan(entry.lines)) continue;
+        if (isBlackhole(entry.lines)) continue;
+        if (!blackholeByDst.get(dst)) {
+          missing.push(entry.lines.join("\n"));
+        }
+      }
+
+      if (missing.length === 0 && badBlackholes.length === 0) {
+        return { satisfied: true, evidence: getBlockSnippet(index, block) };
+      }
+
+      const preview = [...missing, ...badBlackholes].slice(0, 2).join("\n\n");
+      const evidence = [
+        missing.length ? `Missende blackhole routes: ${missing.length}` : "",
+        badBlackholes.length ? `Blackhole distance niet 254: ${badBlackholes.length}` : "",
+        preview,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      return { satisfied: false, evidence };
     },
   },
   system_dns_1_1_1_1_8_8_8_8_doh: {
@@ -414,10 +491,22 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "SSL-VPN lookback",
     run: (index) => {
       const block = findBlock(index, "config system interface");
-      const match = blockHasTokens(block, ['edit "sslvpn_loopback"']);
+      if (!block) return { satisfied: false };
+      const entries = parseEdits(block);
+      const entry = entries.find((item) => item.name.toLowerCase() === "sslvpn_loopback" || item.name === "SSLVPN_Loopback");
+      if (!entry) {
+        return { satisfied: false, evidence: getBlockSnippet(index, block) };
+      }
+      const text = entry.lines.join("\n").toLowerCase();
+      const hasType = text.includes("set type loopback");
+      const hasIp = /set ip\s+192\.168\.192\.168\s+255\.255\.255\.255/i.test(text);
+      const hasAllow = text.includes("set allowaccess ping");
+      const hasRole = text.includes("set role lan");
+      const hasDescription = text.includes("symbis default v1");
+      const satisfied = hasType && hasIp && hasAllow && hasRole && hasDescription;
       return {
-        satisfied: match,
-        evidence: getBlockSnippet(index, block),
+        satisfied,
+        evidence: entry.lines.join("\n"),
       };
     },
   },
@@ -426,13 +515,18 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "SSL-VPN Symbis via EntraID",
     run: (index) => {
       const block = findBlock(index, "config user saml");
-      const text = block?.lines.join("\n").toLowerCase() ?? "";
-      const hasSts = text.includes("sts.windows.net");
-      const hasUser = text.includes("set user-name");
-      return {
-        satisfied: hasSts && hasUser,
-        evidence: getBlockSnippet(index, block),
-      };
+      if (!block) return { satisfied: false };
+      const entries = parseEdits(block);
+      for (const entry of entries) {
+        const text = entry.lines.join("\n").toLowerCase();
+        const hasEntity = text.includes(SYMBIS_ENTRA_ENTITY_ID.toLowerCase());
+        const hasSso = text.includes(`login.microsoftonline.com/${SYMBIS_ENTRA_TENANT_ID}/saml2`);
+        const hasUser = text.includes("set user-name");
+        if (hasEntity && hasSso && hasUser) {
+          return { satisfied: true, evidence: entry.lines.join("\n") };
+        }
+      }
+      return { satisfied: false, evidence: getBlockSnippet(index, block) };
     },
   },
   uitsluitend_ldaps_gebruik: {
@@ -565,11 +659,18 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "firewall_policys_logtraffic_start_disabled",
     label: "Firewall policys logtraffic-start disabled",
     run: (index) => {
-      const block = getPolicyBlock(index);
-      const match = findInBlock(index, block, /set logtraffic-start enable/i);
+      const entries = parseFirewallPolicyEdits(index);
+      const offenders = entries.filter((entry) =>
+        entry.lines.some((line) => /^set logtraffic-start\s+enable/i.test(line.trim()))
+      );
+      if (offenders.length === 0) {
+        return { satisfied: true, evidence: getBlockSnippet(index, getPolicyBlock(index)) };
+      }
+      const preview = offenders.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
+      const evidence = [`logtraffic-start enable policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
       return {
-        satisfied: !match,
-        evidence: getBlockSnippet(index, block),
+        satisfied: false,
+        evidence,
       };
     },
   },
@@ -601,8 +702,8 @@ export const CHECKS: Record<string, CheckDefinition> = {
       const entries = parseFirewallPolicyEdits(index);
       const offenders = entries.filter((entry) => {
         const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
-        const isDeny = actionLine?.toLowerCase().includes("deny");
-        if (isDeny) return false;
+        const isAccept = actionLine?.toLowerCase().includes("accept");
+        if (!isAccept) return false;
         const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
         if (!serviceLine) return false;
         const tokens = parseServiceTokens(serviceLine).map((token) => token.toUpperCase());
@@ -618,6 +719,22 @@ export const CHECKS: Record<string, CheckDefinition> = {
       return {
         satisfied: false,
         evidence,
+      };
+    },
+  },
+  all_service_is_rood: {
+    id: "all_service_is_rood",
+    label: "ALL service is rood",
+    run: (index) => {
+      const block = findBlock(index, "config firewall service custom");
+      if (!block) return { satisfied: false };
+      const entries = parseEdits(block);
+      const entry = entries.find((item) => item.name.toUpperCase() === "ALL");
+      if (!entry) return { satisfied: false, evidence: getBlockSnippet(index, block) };
+      const hasColor = entry.lines.some((line) => /^set color\s+6$/i.test(line.trim()));
+      return {
+        satisfied: hasColor,
+        evidence: entry.lines.join("\n"),
       };
     },
   },
@@ -638,11 +755,25 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "quic_protocol_is_niet_toegestaan",
     label: "QUIC protocol is niet toegestaan",
     run: (index) => {
-      const block = getPolicyBlock(index);
-      const match = findInBlock(index, block, /set service .*\\bQUIC\\b/i);
+      const entries = parseFirewallPolicyEdits(index);
+      const offenders = entries.filter((entry) => {
+        const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
+        const isAccept = actionLine?.toLowerCase().includes("accept");
+        if (!isAccept) return false;
+        const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
+        if (!serviceLine) return false;
+        const tokens = parseServiceTokens(serviceLine).map((token) => token.toUpperCase());
+        return tokens.includes("QUIC") || tokens.includes("ALL");
+      });
+
+      if (offenders.length === 0) {
+        return { satisfied: true, evidence: getBlockSnippet(index, getPolicyBlock(index)) };
+      }
+      const preview = offenders.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
+      const evidence = [`QUIC accept policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
       return {
-        satisfied: !match,
-        evidence: getBlockSnippet(index, block),
+        satisfied: false,
+        evidence,
       };
     },
   },
@@ -878,10 +1009,19 @@ export const CHECKS: Record<string, CheckDefinition> = {
       const block = findBlock(index, "config system sdwan");
       if (!block) return { satisfied: false };
       const text = block.lines.join("\n").toLowerCase();
-      const hasHealth = text.includes("config health-check") || text.includes("config performance-sla");
-      const hasPing = text.includes("set protocol ping") || text.includes("set server");
+      const required = [
+        'config health-check',
+        'edit "cloudflare_google"',
+        'set server "1.1.1.1" "8.8.8.8"',
+        "set members 0",
+        "config sla",
+        "set latency-threshold 50",
+        "set jitter-threshold 30",
+        "set packetloss-threshold 1",
+      ];
+      const satisfied = required.every((token) => text.includes(token));
       return {
-        satisfied: hasHealth && hasPing,
+        satisfied,
         evidence: getBlockSnippet(index, block),
       };
     },
@@ -892,14 +1032,15 @@ export const CHECKS: Record<string, CheckDefinition> = {
     run: (index) => {
       const sdwan = findBlock(index, "config system sdwan");
       const sdwanEnabled = sdwan ? sdwan.lines.join("\n").toLowerCase().includes("set status enable") : false;
-      if (!sdwanEnabled) {
-        return { satisfied: false, skip: true, note: "SD-WAN niet actief" };
-      }
       const block = findBlock(index, "config router static");
+      const evidence = getBlockSnippet(index, block);
+      if (!sdwanEnabled) {
+        return { satisfied: false, skip: true, note: "SD-WAN niet actief", evidence };
+      }
       const match = findInBlock(index, block, /set device \"virtual-wan-link\"/i);
       return {
         satisfied: !!match,
-        evidence: getBlockSnippet(index, block),
+        evidence,
       };
     },
   },
@@ -919,18 +1060,64 @@ export const CHECKS: Record<string, CheckDefinition> = {
     label: "Uitgaande malicious block v2",
     run: (index) => {
       const entries = parseFirewallPolicyEdits(index);
-      const matches = entries.filter((entry) => {
-        const text = entry.lines.join("\n").toLowerCase();
-        if (!text.includes("internet-service-name")) return false;
-        return TOKEN_MATCHES.some((token) => text.includes(token));
-      });
-      if (matches.length === 0) {
-        return { satisfied: false };
+      const required = new Set(REQUIRED_MALICIOUS_SERVICES.map((item) => item.toLowerCase()));
+      const srcCoverage = new Map<string, boolean>();
+      const offenders: string[] = [];
+
+      const parseQuoted = (line: string) => {
+        const matches = line.match(/\"([^\"]+)\"/g);
+        if (matches && matches.length > 0) {
+          return matches.map((match) => match.replace(/\"/g, ""));
+        }
+        return line.split(/\s+/).slice(2);
+      };
+
+      for (const entry of entries) {
+        const dstLine = entry.lines.find((line) => line.trim().startsWith("set dstintf"));
+        if (!dstLine) continue;
+        const dstTokens = parseQuoted(dstLine).map((token) => token.toLowerCase());
+        if (!dstTokens.includes("virtual-wan-link")) continue;
+
+        const srcLine = entry.lines.find((line) => line.trim().startsWith("set srcintf"));
+        const srcTokens = srcLine ? parseQuoted(srcLine).map((token) => token.toLowerCase()) : [];
+        for (const src of srcTokens) {
+          if (!srcCoverage.has(src)) srcCoverage.set(src, false);
+        }
+
+        const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
+        const isDeny = actionLine?.toLowerCase().includes("deny");
+        const serviceLines = entry.lines.filter((line) => line.trim().startsWith("set internet-service-name"));
+        const serviceTokens = serviceLines.flatMap((line) => parseQuoted(line)).map((token) => token.toLowerCase());
+
+        const hasAllServices = [...required].every((token) => serviceTokens.includes(token));
+        if (isDeny && hasAllServices) {
+          for (const src of srcTokens) {
+            srcCoverage.set(src, true);
+          }
+        } else {
+          offenders.push(entry.lines.join("\n"));
+        }
       }
-      const preview = matches.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
+
+      const missingSrc = [...srcCoverage.entries()].filter(([, ok]) => !ok).map(([src]) => src);
+      if (missingSrc.length === 0 && offenders.length === 0 && srcCoverage.size > 0) {
+        return { satisfied: true, evidence: "" };
+      }
+
+      const evidenceParts = [];
+      if (srcCoverage.size === 0) {
+        evidenceParts.push("Geen policies gevonden met dstintf \"virtual-wan-link\".");
+      }
+      if (missingSrc.length > 0) {
+        evidenceParts.push(`Geen Malicious_deny voor: ${missingSrc.join(", ")}`);
+      }
+      if (offenders.length > 0) {
+        evidenceParts.push(offenders.slice(0, 2).join("\n\n"));
+      }
+
       return {
-        satisfied: true,
-        evidence: preview,
+        satisfied: false,
+        evidence: evidenceParts.filter(Boolean).join("\n\n"),
       };
     },
   },
@@ -994,15 +1181,63 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "symbis_utm_profiles_v7",
     label: "Symbis UTM profiles v7",
     run: (index) => {
-      const web = findBlock(index, "config webfilter profile");
-      const dns = findBlock(index, "config dnsfilter profile");
-      const app = findBlock(index, "config application list");
-      const webOk = web?.lines.join("\n").toLowerCase().includes('edit \"symbis\"');
-      const dnsOk = dns?.lines.join("\n").toLowerCase().includes('edit \"symbis\"');
-      const appOk = app?.lines.join("\n").toLowerCase().includes('edit \"symbis\"');
+      const entries = parseFirewallPolicyEdits(index);
+      const deviations: string[] = [];
+
+      const getPolicyLabel = (entry: (typeof entries)[number]) => {
+        const nameLine = entry.lines.find((line) => line.trim().startsWith("set name"));
+        const name = nameLine ? nameLine.split(/\s+/).slice(2).join(" ").replace(/\"/g, "").trim() : "";
+        return name ? `${entry.name} (${name})` : entry.name;
+      };
+
+      const getValue = (line: string) =>
+        line.split(/\s+/).slice(2).join(" ").replace(/\"/g, "").trim();
+
+      for (const entry of entries) {
+        const policyLabel = getPolicyLabel(entry);
+        const utmEnabled = entry.lines.some((line) => line.trim().toLowerCase() === "set utm-status enable");
+        const sslLine = entry.lines.find((line) => line.trim().startsWith("set ssl-ssh-profile"));
+        const webLine = entry.lines.find((line) => line.trim().startsWith("set webfilter-profile"));
+        const appLine = entry.lines.find((line) => line.trim().startsWith("set application-list"));
+
+        if (!utmEnabled && !sslLine && !webLine && !appLine) continue;
+
+        if (sslLine) {
+          const value = getValue(sslLine).toLowerCase();
+          if (!ALLOWED_SSL_SSH_PROFILES.has(value)) {
+            deviations.push(`${policyLabel}: ssl-ssh-profile "${value}"`);
+          }
+        } else if (utmEnabled) {
+          deviations.push(`${policyLabel}: ssl-ssh-profile ontbreekt`);
+        }
+
+        if (webLine) {
+          const value = getValue(webLine).toLowerCase();
+          if (!ALLOWED_WEBFILTER_PROFILES.has(value)) {
+            deviations.push(`${policyLabel}: webfilter-profile "${value}"`);
+          }
+        } else if (utmEnabled) {
+          deviations.push(`${policyLabel}: webfilter-profile ontbreekt`);
+        }
+
+        if (appLine) {
+          const value = getValue(appLine).toLowerCase();
+          if (!ALLOWED_APPLICATION_LISTS.has(value)) {
+            deviations.push(`${policyLabel}: application-list "${value}"`);
+          }
+        } else if (utmEnabled) {
+          deviations.push(`${policyLabel}: application-list ontbreekt`);
+        }
+      }
+
+      if (deviations.length === 0) {
+        return { satisfied: true, evidence: "" };
+      }
+
+      const preview = deviations.slice(0, 6).join("\n");
       return {
-        satisfied: Boolean(webOk && dnsOk && appOk),
-        evidence: "",
+        satisfied: false,
+        evidence: preview,
       };
     },
   },
@@ -1013,15 +1248,19 @@ export const CHECKS: Record<string, CheckDefinition> = {
       const block = findBlock(index, "config firewall ssl-ssh-profile");
       const hasSymbisProfile = blockHasTokens(block, ['edit "symbis-certificate-inspection"']);
 
-      const offenders = parseFirewallPolicyEdits(index).filter((entry) => {
+      const offenders: string[] = [];
+      const entries = parseFirewallPolicyEdits(index);
+      for (const entry of entries) {
         const profileLine = entry.lines.find((line) => line.trim().startsWith("set ssl-ssh-profile"));
-        if (!profileLine) return false;
-        const lower = profileLine.toLowerCase();
-        return lower.includes("certificate-inspection") && !lower.includes("symbis-certificate-inspection");
-      });
+        if (!profileLine) continue;
+        const value = profileLine.split(/\s+/).slice(2).join(" ").replace(/\"/g, "").trim().toLowerCase();
+        if (!ALLOWED_SSL_SSH_PROFILES.has(value)) {
+          offenders.push(`${entry.name}: ssl-ssh-profile "${value}"`);
+        }
+      }
 
       if (offenders.length > 0) {
-        const preview = offenders.slice(0, 3).map((entry) => entry.lines.join("\n")).join("\n\n");
+        const preview = offenders.slice(0, 6).join("\n");
         return { satisfied: false, evidence: preview };
       }
 
@@ -1082,10 +1321,31 @@ export const CHECKS: Record<string, CheckDefinition> = {
     id: "global_black_en_whitelist_github",
     label: "Global black en whitelist (Github)",
     run: (index) => {
-      const hasGithub = index.textLower.includes("raw.githubusercontent.com/symbis/public/main/fortigate/");
+      const external = findBlock(index, "config system external-resource");
+      if (!external) return { satisfied: false };
+      const externalText = external.lines.join("\n").toLowerCase();
+      const hasGithub = externalText.includes("raw.githubusercontent.com/symbis/public/main/fortigate/");
+      const hasBlocklist = externalText.includes('edit "symbis-dns-blocklist"') &&
+        externalText.includes('edit "symbis-webfilter-blocklist"');
+      const hasAllowlist = externalText.includes('edit "symbis-dns-allowlist"') &&
+        externalText.includes('edit "symbis-webfilter-allowlist"');
+
+      const dnsBlock = findBlock(index, "config dnsfilter profile");
+      const webBlock = findBlock(index, "config webfilter profile");
+      const dnsText = dnsBlock?.lines.join("\n").toLowerCase() ?? "";
+      const webText = webBlock?.lines.join("\n").toLowerCase() ?? "";
+
+      const hasDnsBlock = /set category\s+192[\s\S]{0,120}set action\s+block/i.test(dnsText);
+      const hasWebBlock = /set category\s+194[\s\S]{0,120}set action\s+block/i.test(webText);
+      const hasAllowOnLists =
+        /set category\s+193[\s\S]{0,120}set action\s+allow/i.test(dnsText) ||
+        /set category\s+195[\s\S]{0,120}set action\s+allow/i.test(webText);
+
+      const satisfied = hasGithub && hasBlocklist && hasAllowlist && hasDnsBlock && hasWebBlock && !hasAllowOnLists;
+
       return {
-        satisfied: hasGithub,
-        evidence: "",
+        satisfied,
+        evidence: satisfied ? "" : getBlockSnippet(index, external),
       };
     },
   },
@@ -1161,10 +1421,18 @@ export const CHECKS: Record<string, CheckDefinition> = {
     run: (index) => {
       const block = findBlock(index, "config system admin");
       if (!block) return { satisfied: false };
-      const match = block.lines.join("\n").toLowerCase().includes('edit \"adm-symbis\"');
+      const entries = parseEdits(block);
+      const adminEntries = entries.filter((entry) => entry.name.toLowerCase() === "admin");
+      const hasAdmSymbis = entries.some((entry) => entry.name.toLowerCase() === "adm-symbis");
+
+      if (adminEntries.length > 0) {
+        const preview = adminEntries.map((entry) => entry.lines.join("\n")).join("\n\n");
+        return { satisfied: false, evidence: preview };
+      }
+
       return {
-        satisfied: match,
-        evidence: getBlockSnippet(index, block),
+        satisfied: hasAdmSymbis,
+        evidence: hasAdmSymbis ? "" : getBlockSnippet(index, block),
       };
     },
   },

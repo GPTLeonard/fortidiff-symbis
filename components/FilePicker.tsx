@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useMemo } from "react";
-import { Upload, FileCode, CheckCircle2, Calendar, FileType } from "lucide-react";
+import { Upload, CheckCircle2, Calendar, FileType } from "lucide-react";
 import { clsx } from "clsx";
 
 type Props = {
@@ -23,6 +23,12 @@ export default function FilePicker({
 }: Props) {
     const id = useId();
     const hasFile = !!filename;
+    const extension = useMemo(() => {
+        if (!filename) return "CONF";
+        const parts = filename.split(".");
+        const last = parts[parts.length - 1] || "conf";
+        return last.toUpperCase();
+    }, [filename]);
 
     async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
         const f = e.target.files?.[0];
@@ -52,7 +58,7 @@ export default function FilePicker({
             <input
                 id={id}
                 type="file"
-                accept=".conf,.txt"
+                accept=".conf,.txt,.yaml,.yml"
                 onChange={onFileChange}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
             />
@@ -83,7 +89,7 @@ export default function FilePicker({
                     <div className="flex flex-wrap gap-2 mt-2 justify-center">
                         <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#0a0e05] border border-[#94A807]/20 text-xs text-[#94A807] font-mono shadow-sm">
                             <FileType size={12} />
-                            CONF
+                            {extension}
                         </div>
                         {detectedIso && (
                             <div className={clsx(
@@ -94,6 +100,11 @@ export default function FilePicker({
                             )}>
                                 <Calendar size={12} className="text-[#FFEB39]" />
                                 {detectedIso}
+                            </div>
+                        )}
+                        {detectedSource && (
+                            <div className="inline-flex items-center px-2.5 py-1 rounded-md bg-[#0a0e05] border border-[#94A807]/10 text-[10px] uppercase tracking-[0.2em] text-[#a3a890]">
+                                {detectedSource === "content" ? "Inhoud" : "Bestandsnaam"}
                             </div>
                         )}
                     </div>
