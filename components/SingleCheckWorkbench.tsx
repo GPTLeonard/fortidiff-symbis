@@ -6,29 +6,14 @@ import { clsx } from "clsx";
 import FilePicker from "@/components/FilePicker";
 import { detectConfigDate } from "@/lib/date";
 import { parseConfigHeader } from "@/lib/fortigate";
-import { evaluateChecks } from "@/lib/fortigate-checks";
-import { detectCustomerByFilename, getCheckColumns, getRows } from "@/lib/checklist";
+import { evaluateUniversalChecks, formatCheckType } from "@/lib/universal-checks";
 
 type FileState = { text: string; name: string; date: ReturnType<typeof detectConfigDate> } | null;
 type FilterMode = "all" | "fail" | "manual";
 
 export default function SingleCheckWorkbench() {
   const [file, setFile] = useState<FileState>(null);
-  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterMode>("all");
-
-  const rows = useMemo(() => getRows(), []);
-  const checkColumns = useMemo(() => getCheckColumns(), []);
-
-  const matches = useMemo(() => {
-    if (!file) return [];
-    return detectCustomerByFilename(file.name);
-  }, [file]);
-
-  const selectedRow = useMemo(() => {
-    if (!selectedRowId) return null;
-    return rows.find((row) => row.rowId === selectedRowId) ?? null;
-  }, [rows, selectedRowId]);
 
   const header = useMemo(() => (file ? parseConfigHeader(file.text) : null), [file]);
   const versionBelowRecommended = (() => {
@@ -56,9 +41,9 @@ export default function SingleCheckWorkbench() {
   }, [file, hasPasswordMask, hasValidVersion]);
 
   const results = useMemo(() => {
-    if (!file || !selectedRow || !canProceed) return [];
-    return evaluateChecks(file.text, checkColumns, selectedRow.values);
-  }, [file, selectedRow, checkColumns, canProceed]);
+    if (!file || !canProceed) return [];
+    return evaluateUniversalChecks(file.text);
+  }, [file, canProceed]);
 
   const summary = useMemo(() => {
     const pass = results.filter((item) => item.status === "pass").length;
@@ -76,12 +61,9 @@ export default function SingleCheckWorkbench() {
   const handleFile = (text: string, name: string) => {
     const date = detectConfigDate(text, name);
     setFile({ text, name, date });
-    setSelectedRowId(null);
   };
 
   const hasFile = Boolean(file);
-  const hasRow = Boolean(selectedRow);
-  const topMatches = matches.slice(0, 3);
 
   return (
     <div className="w-full space-y-6 animate-in fade-in duration-500">
@@ -104,17 +86,15 @@ export default function SingleCheckWorkbench() {
               Single Config Checklist
             </h2>
             <p className="text-sm text-[#a3a890] mt-1">
-              {hasRow
-                ? "Checklist vergeleken met de klant-baseline."
-                : hasFile
-                  ? canProceed
-                    ? "Selecteer een klant om te vergelijken."
-                    : "Header ontbreekt of password mask uitgeschakeld."
-                  : "Upload een configuratie om te starten."}
+              {hasFile
+                ? canProceed
+                  ? "Checklist vergeleken met de golden baseline."
+                  : "Header ontbreekt of password mask uitgeschakeld."
+                : "Upload een configuratie om te starten."}
             </p>
           </div>
 
-          {hasRow && (
+          {hasFile && canProceed && (
             <div className="flex flex-wrap gap-2">
               <span className="text-xs px-3 py-1 rounded-full bg-[#243305] border border-[#94A807]/20 text-[#a3a890]">
                 Pass: {summary.pass}
@@ -129,64 +109,10 @@ export default function SingleCheckWorkbench() {
           )}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4">
-          <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-3">
-            <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Klantdetectie</div>
-            <div className="text-sm text-[#fcfdec]">
-              {hasRow ? selectedRow?.values.klant : "Geen klant geselecteerd"}
-            </div>
-            {topMatches.length > 0 && (
-              <div className="text-xs text-[#a3a890] space-y-2">
-                <div>Suggesties op basis van bestandsnaam:</div>
-                <div className="flex flex-wrap gap-2">
-                  {topMatches.map((match) => (
-                    <button
-                      key={match.row.rowId}
-                      onClick={() => setSelectedRowId(match.row.rowId)}
-                      disabled={!canProceed}
-                      className={clsx(
-                        "px-3 py-1 rounded-full border text-[#fcfdec] transition",
-                        canProceed
-                          ? "bg-[#243305]/70 border-[#94A807]/20 hover:bg-[#FFEB39] hover:text-[#243305]"
-                          : "bg-[#243305]/30 border-[#94A807]/10 text-[#a3a890] cursor-not-allowed"
-                      )}
-                    >
-                      {match.row.values.klant}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-3">
-            <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Klant selecteren</div>
-            <select
-              className="w-full bg-[#121a08] border border-[#94A807]/20 rounded-lg px-3 py-2 text-sm text-[#fcfdec]"
-              value={selectedRowId ?? ""}
-              onChange={(event) => setSelectedRowId(event.target.value || null)}
-              disabled={!hasFile || !canProceed}
-            >
-              <option value="">Selecteer klant...</option>
-              {rows.map((row) => (
-                <option key={row.rowId} value={row.rowId}>
-                  {row.values.klant}
-                </option>
-              ))}
-            </select>
-            {!hasFile && <div className="text-xs text-[#a3a890]">Upload eerst een configuratie.</div>}
-            {hasFile && !canProceed && (
-              <div className="text-xs text-[#FFB347]">Header ontbreekt of password mask is uit.</div>
-            )}
-          </div>
-        </div>
-
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
             <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Versie</div>
-            <div className="text-sm text-[#fcfdec]">
-              {header?.version ?? "Onbekend"}
-            </div>
+            <div className="text-sm text-[#fcfdec]">{header?.version ?? "Onbekend"}</div>
             {versionBelowRecommended === true && (
               <div className="text-xs text-[#FFB347]">
                 Let op: firmwareversie wijkt af van de geadviseerde versie.
@@ -195,9 +121,7 @@ export default function SingleCheckWorkbench() {
           </div>
           <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
             <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Model</div>
-            <div className="text-sm text-[#fcfdec]">
-              {header?.model ?? "Onbekend"}
-            </div>
+            <div className="text-sm text-[#fcfdec]">{header?.model ?? "Onbekend"}</div>
           </div>
           <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
             <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Password mask</div>
@@ -222,7 +146,7 @@ export default function SingleCheckWorkbench() {
           </div>
         )}
 
-        {hasRow && canProceed && (
+        {hasFile && canProceed && (
           <div className="flex flex-wrap gap-2">
             {(
               [
@@ -248,9 +172,9 @@ export default function SingleCheckWorkbench() {
         )}
 
         <div className="border border-[#94A807]/10 rounded-xl overflow-hidden">
-          <div className="grid grid-cols-[2fr_1fr_120px_3fr] text-xs uppercase tracking-[0.2em] bg-[#0a0e05] text-[#94A807]/80 px-4 py-3">
+          <div className="grid grid-cols-[2fr_160px_120px_3fr] text-xs uppercase tracking-[0.2em] bg-[#0a0e05] text-[#94A807]/80 px-4 py-3">
             <div>Check</div>
-            <div>Baseline</div>
+            <div>Type</div>
             <div>Status</div>
             <div>Bewijs</div>
           </div>
@@ -259,22 +183,27 @@ export default function SingleCheckWorkbench() {
               <div className="p-6 text-sm text-[#a3a890]">
                 {hasFile && !canProceed
                   ? "Header ontbreekt of password mask is uitgeschakeld."
-                  : hasFile && hasRow
+                  : hasFile
                     ? "Geen checks in deze filter."
-                    : "Upload een bestand en kies een klant."}
+                    : "Upload een bestand om te starten."}
               </div>
             )}
             {visibleResults.map((item) => (
               <div
                 key={item.id}
                 className={clsx(
-                  "grid grid-cols-[2fr_1fr_120px_3fr] gap-3 px-4 py-4 text-sm",
+                  "grid grid-cols-[2fr_160px_120px_3fr] gap-3 px-4 py-4 text-sm",
                   item.status === "fail" && "bg-[#2a1208]/40",
                   item.status === "manual" && "bg-[#1a1710]/40"
                 )}
               >
-                <div className="text-[#fcfdec]">{item.label}</div>
-                <div className="text-[#a3a890]">{item.expected || "—"}</div>
+                <div className="text-[#fcfdec]">
+                  <div>{item.name}</div>
+                  {item.section && (
+                    <div className="text-xs text-[#a3a890] mt-1">{item.section}</div>
+                  )}
+                </div>
+                <div className="text-[#a3a890]">{formatCheckType(item.type)}</div>
                 <div className="flex items-center gap-2">
                   {item.status === "pass" && (
                     <span className="inline-flex items-center gap-1 text-[#94A807]">

@@ -200,6 +200,14 @@ function parseServiceTokens(line: string): string[] {
   return parts.split(/\s+/);
 }
 
+function parseQuotedTokens(line: string): string[] {
+  const matches = line.match(/\"([^\"]+)\"/g);
+  if (matches && matches.length > 0) {
+    return matches.map((match) => match.replace(/\"/g, ""));
+  }
+  return line.split(/\s+/).slice(2);
+}
+
 export const CHECKS: Record<string, CheckDefinition> = {
   admin_interface_bereikbaar_vanaf_symbis_en_mgmt_servers: {
     id: "admin_interface_bereikbaar_vanaf_symbis_en_mgmt_servers",
@@ -1037,7 +1045,7 @@ export const CHECKS: Record<string, CheckDefinition> = {
       if (!sdwanEnabled) {
         return { satisfied: false, skip: true, note: "SD-WAN niet actief", evidence };
       }
-      const match = findInBlock(index, block, /set device \"virtual-wan-link\"/i);
+      const match = findInBlock(index, block, /set (device|sdwan-zone) \"virtual-wan-link\"/i);
       return {
         satisfied: !!match,
         evidence,
@@ -1190,8 +1198,10 @@ export const CHECKS: Record<string, CheckDefinition> = {
         return name ? `${entry.name} (${name})` : entry.name;
       };
 
-      const getValue = (line: string) =>
-        line.split(/\s+/).slice(2).join(" ").replace(/\"/g, "").trim();
+      const getValue = (line: string) => {
+        const tokens = parseQuotedTokens(line);
+        return tokens.join(" ").replace(/\"/g, "").trim();
+      };
 
       for (const entry of entries) {
         const policyLabel = getPolicyLabel(entry);
@@ -1203,8 +1213,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
         if (!utmEnabled && !sslLine && !webLine && !appLine) continue;
 
         if (sslLine) {
-          const value = getValue(sslLine).toLowerCase();
-          if (!ALLOWED_SSL_SSH_PROFILES.has(value)) {
+          const value = getValue(sslLine);
+          const normalized = value.toLowerCase();
+          if (!ALLOWED_SSL_SSH_PROFILES.has(normalized)) {
             deviations.push(`${policyLabel}: ssl-ssh-profile "${value}"`);
           }
         } else if (utmEnabled) {
@@ -1212,8 +1223,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
         }
 
         if (webLine) {
-          const value = getValue(webLine).toLowerCase();
-          if (!ALLOWED_WEBFILTER_PROFILES.has(value)) {
+          const value = getValue(webLine);
+          const normalized = value.toLowerCase();
+          if (!ALLOWED_WEBFILTER_PROFILES.has(normalized)) {
             deviations.push(`${policyLabel}: webfilter-profile "${value}"`);
           }
         } else if (utmEnabled) {
@@ -1221,8 +1233,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
         }
 
         if (appLine) {
-          const value = getValue(appLine).toLowerCase();
-          if (!ALLOWED_APPLICATION_LISTS.has(value)) {
+          const value = getValue(appLine);
+          const normalized = value.toLowerCase();
+          if (!ALLOWED_APPLICATION_LISTS.has(normalized)) {
             deviations.push(`${policyLabel}: application-list "${value}"`);
           }
         } else if (utmEnabled) {
@@ -1253,8 +1266,9 @@ export const CHECKS: Record<string, CheckDefinition> = {
       for (const entry of entries) {
         const profileLine = entry.lines.find((line) => line.trim().startsWith("set ssl-ssh-profile"));
         if (!profileLine) continue;
-        const value = profileLine.split(/\s+/).slice(2).join(" ").replace(/\"/g, "").trim().toLowerCase();
-        if (!ALLOWED_SSL_SSH_PROFILES.has(value)) {
+        const value = parseQuotedTokens(profileLine).join(" ").replace(/\"/g, "").trim();
+        const normalized = value.toLowerCase();
+        if (!ALLOWED_SSL_SSH_PROFILES.has(normalized)) {
           offenders.push(`${entry.name}: ssl-ssh-profile "${value}"`);
         }
       }
