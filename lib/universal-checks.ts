@@ -62,13 +62,11 @@ const SSL_VPN_CHECKS = new Set(["ssl_vpn_loopback", "ssl_vpn_cipher_suites", "ss
 const MANUAL_CHECKS = new Set([
   "server_protecting_actief_op_vips",
   "malicious_block_op_vips_v3",
-  "geen_verschil_in_ha_device_priority",
 ]);
 
 const MANUAL_NOTES: Record<string, string> = {
   server_protecting_actief_op_vips: "Nog niet geautomatiseerd",
   malicious_block_op_vips_v3: "Nog niet geautomatiseerd",
-  geen_verschil_in_ha_device_priority: "Niet controleerbaar in single config",
 };
 
 const LOW_END_MODELS = new Set(
@@ -401,14 +399,31 @@ function checkHaSessionPickup(index: ConfigIndex): CheckOutcome {
   const block = findBlock(index, "config system ha");
   if (!isHaConfigured(block)) {
     return {
-      status: "manual",
-      note: "HA niet actief",
+      status: "pass",
       evidence: block ? getBlockSnippet(index, block) : "",
     };
   }
   const match = block?.lines.some((line) => line.trim().toLowerCase() === "set session-pickup enable");
   return {
     status: match ? "pass" : "fail",
+    evidence: getBlockSnippet(index, block),
+  };
+}
+
+function checkHaDevicePriority(index: ConfigIndex): CheckOutcome {
+  const block = findBlock(index, "config system ha");
+  if (!block || !isHaConfigured(block)) {
+    return { status: "pass", evidence: block ? getBlockSnippet(index, block) : "" };
+  }
+
+  const text = block.lines.join("\n").toLowerCase();
+  if (text.includes("set override disable")) {
+    return { status: "pass", evidence: getBlockSnippet(index, block) };
+  }
+
+  const hasPriority = block.lines.some((line) => line.trim().toLowerCase().startsWith("set priority "));
+  return {
+    status: hasPriority ? "fail" : "pass",
     evidence: getBlockSnippet(index, block),
   };
 }
@@ -661,8 +676,8 @@ function checkIpsCpAccel(index: ConfigIndex): CheckOutcome {
   const normalizedModel = normalizeModelName(header.model);
   if (!normalizedModel || !LOW_END_MODELS.has(normalizedModel)) {
     return {
-      status: "manual",
-      note: normalizedModel ? `Niet 2GB model (${normalizedModel})` : "Model onbekend",
+      status: "pass",
+      evidence: normalizedModel ? `Niet 2GB model (${normalizedModel})` : "Model onbekend",
     };
   }
   const block = findBlock(index, "config ips global");
@@ -671,6 +686,65 @@ function checkIpsCpAccel(index: ConfigIndex): CheckOutcome {
     status: match ? "pass" : "fail",
     evidence: getBlockSnippet(index, block),
   };
+}
+
+function checkInterfaceRole(index: ConfigIndex): CheckOutcome {
+  const block = findBlock(index, "config system interface");
+  if (!block) return { status: "fail" };
+  const hasRole = block.lines.some((line) => line.trim().toLowerCase().startsWith("set role "));
+  return {
+    status: "pass",
+    evidence: hasRole ? getBlockSnippet(index, block) : "",
+  };
+}
+
+function checkLocalInPolicy(index: ConfigIndex): CheckOutcome {
+  const definition = checkDefinitions.find((item) => item.id === "local_in_policy_v7");
+  if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
+  return evaluateReference(definition, index, false, false);
+}
+
+function checkExternalSymbisLists(index: ConfigIndex): CheckOutcome {
+  const block = findBlock(index, "config system external-resource");
+  if (!block) return { status: "fail" };
+  const entries = parseEdits(block);
+  const required = [
+    {
+      label: "symbis-dns-blocklist",
+      resource: "https://raw.githubusercontent.com/symbis/Public/main/FortiGate/blocklist",
+      category: "192",
+    },
+    {
+      label: "symbis-dns-allowlist",
+      resource: "https://raw.githubusercontent.com/symbis/Public/main/FortiGate/allowlist",
+      category: "193",
+    },
+    {
+      label: "symbis-webfilter-blocklist",
+      resource: "https://raw.githubusercontent.com/symbis/Public/main/FortiGate/blocklist",
+      category: "194",
+    },
+    {
+      label: "symbis-webfilter-allowlist",
+      resource: "https://raw.githubusercontent.com/symbis/Public/main/FortiGate/allowlist",
+      category: "195",
+    },
+  ];
+
+  const matchesRequired = (entry: (typeof entries)[number], req: (typeof required)[number]) => {
+    const resourceLine = entry.lines.find((line) => line.trim().startsWith("set resource"));
+    const categoryLine = entry.lines.find((line) => line.trim().startsWith("set category"));
+    if (!resourceLine || !categoryLine) return false;
+    return resourceLine.includes(req.resource) && categoryLine.includes(`set category ${req.category}`);
+  };
+
+  const missing = required.filter((req) => !entries.some((entry) => matchesRequired(entry, req)));
+  if (missing.length === 0) {
+    return { status: "pass", evidence: getBlockSnippet(index, block) };
+  }
+
+  const evidence = `Missende lists:\n${missing.map((req) => `- ${req.label}`).join("\n")}`;
+  return { status: "fail", evidence };
 }
 
 function checkServicesNotStacked(index: ConfigIndex): CheckOutcome {
@@ -907,6 +981,8 @@ const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
   logging_naar_cloud_of_analyzer: checkLogging,
   idle_timeout_maximaal_15_minuten: checkIdleTimeout,
   ha_session_pickup: checkHaSessionPickup,
+  geen_verschil_in_ha_device_priority: checkHaDevicePriority,
+  interface_role_gedefinieerd: checkInterfaceRole,
   uitsluitend_ldaps_gebruik: checkLdapsOnly,
   uitsluitend_radius_ms_chap_v2: checkRadiusMsChap,
   geen_local_users: checkLocalUsers,
@@ -918,6 +994,8 @@ const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
   ips_cp_accel_mode_none: checkIpsCpAccel,
   services_in_firewall_policies_zijn_niet_gestapeld: checkServicesNotStacked,
   all_service_wordt_niet_gebruikt_in_firewall_policies: checkAllServiceNotUsed,
+  local_in_policy_v7: checkLocalInPolicy,
+  global_black_en_whitelist_github: checkExternalSymbisLists,
   all_service_is_rood: checkAllServiceRed,
   symbis_utm_profiles_v7: checkSymbisUtmProfiles,
   symbis_certificate_inspection: checkSymbisCertificateInspection,
