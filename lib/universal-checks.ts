@@ -108,13 +108,14 @@ function normalizeModelName(model: string | null) {
 
 function isSslVpnSupported(model: string | null) {
   if (!model) return true;
-  const normalized = model.toUpperCase();
+  const normalized = model.toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (normalized.includes("VM")) return true;
-  const match = normalized.match(/(\d+)/);
-  if (!match) return true;
-  const value = Number(match[1]);
-  if (!Number.isFinite(value)) return true;
-  return value >= 90;
+  const gMatch = normalized.match(/(\d+)G/);
+  if (gMatch) {
+    const value = Number(gMatch[1]);
+    if ([30, 50, 70, 90].includes(value)) return false;
+  }
+  return true;
 }
 
 function extractSetLines(lines: string[]) {
@@ -762,6 +763,40 @@ function checkServicesNotStacked(index: ConfigIndex): CheckOutcome {
   return { status: "pass", evidence: getBlockSnippet(index, findBlock(index, "config firewall policy")) };
 }
 
+function checkLogtrafficStartDisabled(index: ConfigIndex): CheckOutcome {
+  const entries = parseFirewallPolicyEdits(index);
+  const offenders = entries.filter((entry) =>
+    entry.lines.some((line) => /^set logtraffic-start\s+enable/i.test(line.trim()))
+  );
+  if (offenders.length === 0) {
+    return { status: "pass", evidence: getBlockSnippet(index, findBlock(index, "config firewall policy")) };
+  }
+  const preview = offenders.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
+  const evidence = [`logtraffic-start enable policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
+  return { status: "fail", evidence };
+}
+
+function checkSslLabsObject(index: ConfigIndex): CheckOutcome {
+  const block = findBlock(index, "config firewall address");
+  if (!block) return { status: "fail" };
+  const entries = parseEdits(block);
+  const entry = entries.find((item) => item.name.toLowerCase() === "s-qualys_ssl_labs");
+  if (!entry) {
+    return { status: "fail", evidence: "SSL Labs object ontbreekt." };
+  }
+
+  const text = entry.lines.join("\n");
+  const hasComment = /set comment\\s+\"Symbis default v2\"/i.test(text);
+  const hasSubnet = /set subnet\\s+69\\.67\\.183\\.0\\s+255\\.255\\.255\\.0/i.test(text);
+  if (hasComment && hasSubnet) {
+    return { status: "pass", evidence: entry.lines.join("\n") };
+  }
+
+  const missing = [!hasComment ? "comment" : "", !hasSubnet ? "subnet" : ""].filter(Boolean).join(", ");
+  const evidence = [`Ontbrekend: ${missing}`, entry.lines.join("\n")].filter(Boolean).join("\n\n");
+  return { status: "fail", evidence };
+}
+
 function checkAllServiceNotUsed(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   const offenders = entries.filter((entry) => {
@@ -799,8 +834,42 @@ function checkAllServiceRed(index: ConfigIndex): CheckOutcome {
 function checkSymbisUtmProfiles(index: ConfigIndex): CheckOutcome {
   const definition = checkDefinitions.find((item) => item.id === "symbis_utm_profiles_v7");
   if (definition?.reference) {
-    const referenceOutcome = evaluateReference(definition, index, true, false);
-    if (referenceOutcome.status === "fail") return referenceOutcome;
+    const refBlocks = buildReferenceBlocks(definition.reference);
+    const missing: string[] = [];
+
+    for (const refBlock of refBlocks) {
+      const actualBlocks = index.blocksByHeader.get(refBlock.header) ?? [];
+      if (actualBlocks.length === 0) {
+        missing.push(`${refBlock.header}: block ontbreekt`);
+        continue;
+      }
+
+      const actualEdits = actualBlocks.flatMap((block) => parseEdits(block));
+      for (const refEdit of refBlock.edits) {
+        if (refEdit.name) {
+          const refName = refEdit.name ?? "";
+          const actualEdit = actualEdits.find(
+            (edit) => edit.name.toLowerCase() === refName.toLowerCase()
+          );
+          if (!actualEdit) {
+            missing.push(`${refBlock.header}: profiel \"${refName}\" ontbreekt`);
+            continue;
+          }
+          if (!matchLines(refEdit.lines, actualEdit.lines)) {
+            missing.push(`${refBlock.header}: profiel \"${refName}\" wijkt af`);
+          }
+        } else if (!matchLines(refEdit.lines, actualBlocks[0].lines)) {
+          missing.push(`${refBlock.header}: inhoud wijkt af`);
+        }
+      }
+    }
+
+    if (missing.length > 0) {
+      return {
+        status: "fail",
+        evidence: `Ontbrekende of afwijkende profielen:\n${missing.map((item) => `- ${item}`).join("\n")}`,
+      };
+    }
   }
 
   const entries = parseFirewallPolicyEdits(index);
@@ -992,6 +1061,8 @@ const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
   bekende_doh_servers_geblocked_via_isdb: checkDoHBlocked,
   quic_protocol_is_niet_toegestaan: checkQuicPolicy,
   ips_cp_accel_mode_none: checkIpsCpAccel,
+  firewall_policies_logtraffic_start_disabled: checkLogtrafficStartDisabled,
+  ssl_labs_object: checkSslLabsObject,
   services_in_firewall_policies_zijn_niet_gestapeld: checkServicesNotStacked,
   all_service_wordt_niet_gebruikt_in_firewall_policies: checkAllServiceNotUsed,
   local_in_policy_v7: checkLocalInPolicy,
