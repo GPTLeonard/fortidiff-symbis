@@ -159,11 +159,35 @@ export function findBlocksByPrefix(index: ConfigIndex, prefix: string): FgBlock[
 export function parseEdits(block: FgBlock): FgEdit[] {
   const edits: FgEdit[] = [];
   let current: FgEdit | null = null;
+  let depth = 0;
 
   block.lines.forEach((line, offset) => {
     const trimmed = line.trim();
     const absoluteIndex = block.start + offset;
-    if (trimmed.startsWith("edit ")) {
+
+    if (trimmed.startsWith("config ")) {
+      depth += 1;
+      if (current) {
+        current.lines.push(line);
+        current.end = absoluteIndex;
+      }
+      return;
+    }
+
+    if (trimmed === "end") {
+      if (current) {
+        current.lines.push(line);
+        current.end = absoluteIndex;
+      }
+      depth = Math.max(0, depth - 1);
+      if (depth === 0 && current) {
+        edits.push(current);
+        current = null;
+      }
+      return;
+    }
+
+    if (trimmed.startsWith("edit ") && depth === 1) {
       if (current) {
         edits.push(current);
       }
@@ -179,7 +203,7 @@ export function parseEdits(block: FgBlock): FgEdit[] {
     if (current) {
       current.lines.push(line);
       current.end = absoluteIndex;
-      if (trimmed === "next") {
+      if (trimmed === "next" && depth === 1) {
         edits.push(current);
         current = null;
       }
