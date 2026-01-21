@@ -11,9 +11,14 @@ type TabId = "diff" | "single";
 export default function WorkbenchTabs() {
   const [active, setActive] = useState<TabId>("diff");
 
-  const tabs: { id: TabId; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
-    { id: "diff", label: "Diff Workbench", icon: ArrowLeftRight },
-    { id: "single", label: "Baseline Check", icon: FileSearch },
+  const tabs: {
+    id: TabId;
+    label: string;
+    icon: React.ComponentType<{ size?: number }>;
+    badge?: string;
+  }[] = [
+    { id: "diff", label: "Diff Workbench", icon: ArrowLeftRight, badge: "Beta" },
+    { id: "single", label: "Baseline Check", icon: FileSearch, badge: "Beta" },
   ];
 
   return (
@@ -32,6 +37,11 @@ export default function WorkbenchTabs() {
           >
             <tab.icon size={14} />
             {tab.label}
+            {tab.badge && (
+              <span className="text-[10px] uppercase tracking-[0.2em] px-2 py-0.5 rounded-full bg-[#FFEB39]/10 text-[#FFEB39] border border-[#FFEB39]/30">
+                {tab.badge}
+              </span>
+            )}
           </button>
         ))}
       </div>

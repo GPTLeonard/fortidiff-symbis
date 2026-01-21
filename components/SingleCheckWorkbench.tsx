@@ -81,6 +81,9 @@ export default function SingleCheckWorkbench() {
             <h2 className="text-lg font-semibold text-[#fcfdec] flex items-center gap-2">
               <FileSearch size={18} className="text-[#FFEB39]" />
               Baseline Check
+              <span className="text-[10px] uppercase tracking-[0.2em] px-2 py-0.5 rounded-full bg-[#FFEB39]/10 text-[#FFEB39] border border-[#FFEB39]/30">
+                Beta
+              </span>
             </h2>
             <p className="text-sm text-[#a3a890] mt-1">
               {hasFile

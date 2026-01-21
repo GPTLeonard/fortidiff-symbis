@@ -211,6 +211,12 @@ ${diffContent}`;
 
     return (
         <div className="w-full space-y-6 animate-in fade-in duration-500">
+            <div className="flex items-center justify-between">
+                <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Diff Workbench</div>
+                <span className="text-[10px] uppercase tracking-[0.2em] px-2 py-0.5 rounded-full bg-[#FFEB39]/10 text-[#FFEB39] border border-[#FFEB39]/30">
+                    Beta
+                </span>
+            </div>
             {/* File Pickers */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <FilePicker
