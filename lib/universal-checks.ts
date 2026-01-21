@@ -114,7 +114,8 @@ function isSslVpnSupported(model: string | null) {
 function extractSetLines(lines: string[]) {
   return lines
     .map((line) => line.trim())
-    .filter((line) => line.startsWith("set ") || line.startsWith("unset "));
+    .filter((line) => line.startsWith("set ") || line.startsWith("unset "))
+    .filter((line) => !/^set uuid\b/i.test(line));
 }
 
 function splitAlternatives(reference: string) {
@@ -339,21 +340,12 @@ function collectTokens(lines: string[], prefix: string) {
     .filter(Boolean);
 }
 
-function getPolicyAction(lines: string[]) {
-  const line = lines.find((item) => item.trim().toLowerCase().startsWith("set action"));
-  if (!line) return null;
-  const token = line.trim().split(/\s+/)[2];
-  return token ? token.toLowerCase() : null;
-}
-
 function isPolicyAccept(lines: string[]) {
-  const action = getPolicyAction(lines);
-  return !action || action === "accept";
+  return lines.some((line) => /^set action\s+accept/i.test(line.trim()));
 }
 
-function isPolicyDeny(lines: string[]) {
-  const action = getPolicyAction(lines);
-  return action === "deny" || action === "reject";
+function isPolicyImplicitDeny(lines: string[]) {
+  return !isPolicyAccept(lines);
 }
 
 function resolveRequiredDstInterfaces(index: ConfigIndex, base: string[]) {
@@ -519,7 +511,7 @@ function checkIpsecEncryption(index: ConfigIndex): CheckOutcome {
     return { status: "pass", evidence: total ? `Alle ${total} IPsec entries voldoen.` : "" };
   }
 
-  const maxPreview = 3;
+  const maxPreview = 10;
   const preview = offenders.slice(0, maxPreview).join("\n\n");
   const suffix =
     offenders.length > maxPreview ? `Nog ${offenders.length - maxPreview} afwijking(en) niet getoond.` : "";
@@ -564,8 +556,12 @@ function checkIpsecKeylife(index: ConfigIndex): CheckOutcome {
     return { status: "pass", evidence: total ? `Alle ${total} IPsec entries voldoen.` : "" };
   }
 
-  const preview = offenders.slice(0, 2).join("\n\n");
-  const evidence = [`Afwijkingen: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
+  const maxPreview = 10;
+  const preview = offenders.slice(0, maxPreview).join("\n\n");
+  const suffix =
+    offenders.length > maxPreview ? `Nog ${offenders.length - maxPreview} afwijking(en) niet getoond.` : "";
+  const header = `Afwijkingen: ${offenders.length}${offenders.length > maxPreview ? ` (${maxPreview} getoond)` : ""}`;
+  const evidence = [header, preview, suffix].filter(Boolean).join("\n\n");
   return { status: "fail", evidence };
 }
 
@@ -642,44 +638,40 @@ function checkIpsecBlackholes(index: ConfigIndex): CheckOutcome {
 function checkDoHBlocked(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   const requiredDst = resolveRequiredDstInterfaces(index, ["virtual-wan-link", "wan1", "wan2"]);
-  const covered = new Set<string>();
-  const offenders: string[] = [];
+  const acceptPolicies: string[] = [];
+  const denyPolicies: string[] = [];
 
   for (const entry of entries) {
     const dstTokens = collectTokens(entry.lines, "set dstintf").map((token) => token.toLowerCase());
-    const relevantDst = dstTokens.filter((token) => requiredDst.has(token));
-    if (relevantDst.length === 0) continue;
+    if (!dstTokens.some((token) => requiredDst.has(token))) continue;
 
     const serviceTokens = collectTokens(entry.lines, "set internet-service-name").map((token) =>
       token.toLowerCase()
     );
-    const hasDoH = serviceTokens.includes("dns-doh_dot");
-    if (!hasDoH) continue;
+    if (!serviceTokens.includes("dns-doh_dot")) continue;
 
-    if (!isPolicyDeny(entry.lines)) {
-      offenders.push(entry.lines.join("\n"));
-      continue;
-    }
-
-    for (const dst of relevantDst) {
-      covered.add(dst);
+    if (isPolicyAccept(entry.lines)) {
+      acceptPolicies.push(entry.lines.join("\n"));
+    } else if (isPolicyImplicitDeny(entry.lines)) {
+      denyPolicies.push(entry.lines.join("\n"));
     }
   }
 
-  const missing = [...requiredDst].filter((dst) => !covered.has(dst));
-  if (missing.length === 0 && offenders.length === 0) {
-    return { status: "pass" };
+  if (acceptPolicies.length > 0) {
+    return {
+      status: "fail",
+      evidence: acceptPolicies.slice(0, 2).join("\n\n"),
+    };
   }
 
-  const evidenceParts = [];
-  if (missing.length > 0) {
-    evidenceParts.push(`Geen DoH deny voor dstintf: ${missing.join(", ")}`);
-  }
-  if (offenders.length > 0) {
-    evidenceParts.push(offenders.slice(0, 2).join("\n\n"));
+  if (denyPolicies.length > 0) {
+    return { status: "pass", evidence: denyPolicies[0] };
   }
 
-  return { status: "fail", evidence: evidenceParts.join("\n\n") };
+  return {
+    status: "fail",
+    evidence: 'Geen DoH deny policy gevonden voor dstintf "virtual-wan-link", "wan1" of "wan2".',
+  };
 }
 
 function checkQuicPolicy(index: ConfigIndex): CheckOutcome {
@@ -860,14 +852,12 @@ function checkSslLabsObject(index: ConfigIndex): CheckOutcome {
   }
 
   const text = entry.lines.join("\n");
-  const hasComment = /set comment\\s+\"Symbis default v2\"/i.test(text);
-  const hasSubnet = /set subnet\\s+69\\.67\\.183\\.0\\s+255\\.255\\.255\\.0/i.test(text);
-  if (hasComment && hasSubnet) {
+  const hasSubnet = /set subnet\s+69\.67\.183\.0\s+255\.255\.255\.0/i.test(text);
+  if (hasSubnet) {
     return { status: "pass", evidence: entry.lines.join("\n") };
   }
 
-  const missing = [!hasComment ? "comment" : "", !hasSubnet ? "subnet" : ""].filter(Boolean).join(", ");
-  const evidence = [`Ontbrekend: ${missing}`, entry.lines.join("\n")].filter(Boolean).join("\n\n");
+  const evidence = ["Ontbrekend: subnet", entry.lines.join("\n")].filter(Boolean).join("\n\n");
   return { status: "fail", evidence };
 }
 
@@ -1042,8 +1032,9 @@ function checkMaliciousBlock(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   const required = new Set(REQUIRED_MALICIOUS_SERVICES.map((item) => item.toLowerCase()));
   const requiredDst = resolveRequiredDstInterfaces(index, ["virtual-wan-link", "wan1", "wan2"]);
-  const dstCoverage = new Map<string, boolean>();
-  const offenders: string[] = [];
+  const acceptPolicies: string[] = [];
+  const denyPolicies: string[] = [];
+  const invalidPolicies: string[] = [];
 
   for (const entry of entries) {
     const dstTokens = collectTokens(entry.lines, "set dstintf").map((token) => token.toLowerCase());
@@ -1057,35 +1048,34 @@ function checkMaliciousBlock(index: ConfigIndex): CheckOutcome {
     if (!hasAny) continue;
 
     const hasAllServices = [...required].every((token) => serviceTokens.includes(token));
-    if (isPolicyDeny(entry.lines) && hasAllServices) {
-      for (const dst of relevantDst) {
-        dstCoverage.set(dst, true);
-      }
+    if (isPolicyAccept(entry.lines)) {
+      acceptPolicies.push(entry.lines.join("\n"));
+    } else if (isPolicyImplicitDeny(entry.lines) && hasAllServices) {
+      denyPolicies.push(entry.lines.join("\n"));
     } else {
-      offenders.push(entry.lines.join("\n"));
+      invalidPolicies.push(entry.lines.join("\n"));
     }
   }
 
-  const missingDst = [...requiredDst].filter((dst) => !dstCoverage.get(dst));
-  if (missingDst.length === 0 && offenders.length === 0 && dstCoverage.size > 0) {
+  if (acceptPolicies.length > 0) {
+    return {
+      status: "fail",
+      evidence: acceptPolicies.slice(0, 2).join("\n\n"),
+    };
+  }
+
+  if (denyPolicies.length > 0) {
     return { status: "pass" };
   }
 
-  const evidenceParts = [];
-  if (dstCoverage.size === 0) {
-    evidenceParts.push('Geen policies gevonden met dstintf "virtual-wan-link", "wan1" of "wan2".');
-  }
-  if (missingDst.length > 0) {
-    evidenceParts.push(`Geen Malicious_deny voor: ${missingDst.join(", ")}`);
-  }
-  if (offenders.length > 0) {
-    evidenceParts.push(offenders.slice(0, 2).join("\n\n"));
+  const evidenceParts = [
+    'Geen malicious_deny policy gevonden voor dstintf "virtual-wan-link", "wan1" of "wan2".',
+  ];
+  if (invalidPolicies.length > 0) {
+    evidenceParts.push(invalidPolicies.slice(0, 2).join("\n\n"));
   }
 
-  return {
-    status: "fail",
-    evidence: evidenceParts.filter(Boolean).join("\n\n"),
-  };
+  return { status: "fail", evidence: evidenceParts.join("\n\n") };
 }
 
 function checkDefaultRouteSdwan(index: ConfigIndex): CheckOutcome {
@@ -1187,6 +1177,8 @@ function checkMaliciousBlockVip(index: ConfigIndex): CheckOutcome {
 
   const required = new Set(REQUIRED_MALICIOUS_SERVICES.map((item) => item.toLowerCase()));
   const entries = parseFirewallPolicyEdits(index);
+  const acceptPolicies: string[] = [];
+  const denyPolicies: string[] = [];
   const offenders: string[] = [];
 
   for (const entry of entries) {
@@ -1201,7 +1193,10 @@ function checkMaliciousBlockVip(index: ConfigIndex): CheckOutcome {
     if (!hasAny) continue;
 
     const hasAll = [...required].every((token) => serviceTokens.includes(token));
-    if (isPolicyDeny(entry.lines) && hasAll) {
+    if (isPolicyAccept(entry.lines)) {
+      acceptPolicies.push(entry.lines.join("\n"));
+    } else if (isPolicyImplicitDeny(entry.lines) && hasAll) {
+      denyPolicies.push(entry.lines.join("\n"));
       for (const vip of matchedVips) {
         coverage.set(vip, true);
       }
@@ -1210,8 +1205,12 @@ function checkMaliciousBlockVip(index: ConfigIndex): CheckOutcome {
     }
   }
 
+  if (acceptPolicies.length > 0) {
+    return { status: "fail", evidence: acceptPolicies.slice(0, 2).join("\n\n") };
+  }
+
   const missing = [...coverage.entries()].filter(([, ok]) => !ok).map(([vip]) => vipByLower.get(vip) ?? vip);
-  if (missing.length === 0 && offenders.length === 0) {
+  if (missing.length === 0 && offenders.length === 0 && denyPolicies.length > 0) {
     return { status: "pass" };
   }
 
