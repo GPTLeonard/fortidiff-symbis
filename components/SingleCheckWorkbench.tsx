@@ -6,7 +6,7 @@ import { clsx } from "clsx";
 import FilePicker from "@/components/FilePicker";
 import { detectConfigDate } from "@/lib/date";
 import { parseConfigHeader } from "@/lib/fortigate";
-import { evaluateUniversalChecks, formatCheckType } from "@/lib/universal-checks";
+import { evaluateUniversalChecks } from "@/lib/universal-checks";
 
 type FileState = { text: string; name: string; date: ReturnType<typeof detectConfigDate> } | null;
 type FilterMode = "all" | "fail" | "manual";
@@ -85,7 +85,7 @@ export default function SingleCheckWorkbench() {
             <p className="text-sm text-[#a3a890] mt-1">
               {hasFile
                 ? canProceed
-                  ? "Checklist vergeleken met de golden baseline."
+                  ? "Checklist vergeleken met de Symbis baseline."
                   : "Firmwareversie ontbreekt in de header."
                 : "Upload een configuratie om te starten."}
             </p>
@@ -123,11 +123,11 @@ export default function SingleCheckWorkbench() {
           <div className="bg-[#0a0e05] border border-[#94A807]/10 rounded-xl p-4 space-y-2">
             <div className="text-xs uppercase tracking-[0.2em] text-[#94A807]/80">Password mask</div>
             <div className="text-sm text-[#fcfdec]">
-              {header?.passwordMask === null
-                ? "Onbekend"
-                : header?.passwordMask
+              {header
+                ? header.passwordMask
                   ? "Ingeschakeld"
-                  : "Uitgeschakeld"}
+                  : "Uitgeschakeld"
+                : "Onbekend"}
             </div>
             {!hasPasswordMask && hasFile && (
               <div className="text-xs text-[#FFB347]">Dude geen wachtwoorden erin</div>
@@ -169,9 +169,8 @@ export default function SingleCheckWorkbench() {
         )}
 
         <div className="border border-[#94A807]/10 rounded-xl overflow-hidden">
-          <div className="grid grid-cols-[2fr_160px_120px_3fr] text-xs uppercase tracking-[0.2em] bg-[#0a0e05] text-[#94A807]/80 px-4 py-3">
+          <div className="grid grid-cols-[2fr_120px_3fr] text-xs uppercase tracking-[0.2em] bg-[#0a0e05] text-[#94A807]/80 px-4 py-3">
             <div>Check</div>
-            <div>Type</div>
             <div>Status</div>
             <div>Bewijs</div>
           </div>
@@ -189,7 +188,7 @@ export default function SingleCheckWorkbench() {
               <div
                 key={item.id}
                 className={clsx(
-                  "grid grid-cols-[2fr_160px_120px_3fr] gap-3 px-4 py-4 text-sm",
+                  "grid grid-cols-[2fr_120px_3fr] gap-3 px-4 py-4 text-sm",
                   item.status === "fail" && "bg-[#2a1208]/40",
                   item.status === "manual" && "bg-[#1a1710]/40"
                 )}
@@ -200,7 +199,6 @@ export default function SingleCheckWorkbench() {
                     <div className="text-xs text-[#a3a890] mt-1">{item.section}</div>
                   )}
                 </div>
-                <div className="text-[#a3a890]">{formatCheckType(item.type)}</div>
                 <div className="flex items-center gap-2">
                   {item.status === "pass" && (
                     <span className="inline-flex items-center gap-1 text-[#94A807]">

@@ -53,8 +53,6 @@ const REQUIRED_MALICIOUS_SERVICES = [
   "VPN-Anonymous.VPN",
 ];
 
-const ALLOWED_WEBFILTER_PROFILES = new Set(["symbis", "symbis-monitor"]);
-const ALLOWED_APPLICATION_LISTS = new Set(["symbis", "symbis-default-port", "symbis-monitor"]);
 const ALLOWED_SSL_SSH_PROFILES = new Set(["symbis-certificate-inspection"]);
 
 const SSL_VPN_CHECKS = new Set(["ssl_vpn_loopback", "ssl_vpn_cipher_suites", "ssl_vpn_timeout_10_uur"]);
@@ -875,8 +873,8 @@ function checkAllServiceNotUsed(index: ConfigIndex): CheckOutcome {
     return { status: "pass", evidence: getBlockSnippet(index, findBlock(index, "config firewall policy")) };
   }
 
-  const preview = offenders.slice(0, 3).map((entry) => entry.lines.join("\n")).join("\n\n");
-  const evidence = [`ALL accept policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
+  const allOffenders = offenders.map((entry) => entry.lines.join("\n")).join("\n\n");
+  const evidence = [`ALL accept policies: ${offenders.length}`, allOffenders].filter(Boolean).join("\n\n");
   return { status: "fail", evidence };
 }
 
@@ -895,105 +893,46 @@ function checkAllServiceRed(index: ConfigIndex): CheckOutcome {
 
 function checkSymbisUtmProfiles(index: ConfigIndex): CheckOutcome {
   const definition = checkDefinitions.find((item) => item.id === "symbis_utm_profiles_v7");
-  if (definition?.reference) {
-    const refBlocks = buildReferenceBlocks(definition.reference);
-    const missing: string[] = [];
+  if (!definition?.reference) {
+    return { status: "manual", note: "Geen referentie beschikbaar" };
+  }
 
-    for (const refBlock of refBlocks) {
-      const actualBlocks = index.blocksByHeader.get(refBlock.header) ?? [];
-      if (actualBlocks.length === 0) {
-        missing.push(`${refBlock.header}: block ontbreekt`);
-        continue;
-      }
+  const refBlocks = buildReferenceBlocks(definition.reference);
+  const missing: string[] = [];
 
-      const actualEdits = actualBlocks.flatMap((block) => parseEdits(block));
-      for (const refEdit of refBlock.edits) {
-        if (refEdit.name) {
-          const refName = refEdit.name ?? "";
-          const actualEdit = actualEdits.find(
-            (edit) => edit.name.toLowerCase() === refName.toLowerCase()
-          );
-          if (!actualEdit) {
-            missing.push(`${refBlock.header}: profiel \"${refName}\" ontbreekt`);
-            continue;
-          }
-          if (!matchLines(refEdit.lines, actualEdit.lines)) {
-            missing.push(`${refBlock.header}: profiel \"${refName}\" wijkt af`);
-          }
-        } else if (!matchLines(refEdit.lines, actualBlocks[0].lines)) {
-          missing.push(`${refBlock.header}: inhoud wijkt af`);
+  for (const refBlock of refBlocks) {
+    const actualBlocks = index.blocksByHeader.get(refBlock.header) ?? [];
+    if (actualBlocks.length === 0) {
+      missing.push(`${refBlock.header}: block ontbreekt`);
+      continue;
+    }
+
+    const actualEdits = actualBlocks.flatMap((block) => parseEdits(block));
+    for (const refEdit of refBlock.edits) {
+      if (refEdit.name) {
+        const refName = refEdit.name ?? "";
+        const actualEdit = actualEdits.find((edit) => edit.name.toLowerCase() === refName.toLowerCase());
+        if (!actualEdit) {
+          missing.push(`${refBlock.header}: profiel \"${refName}\" ontbreekt`);
+          continue;
         }
+        if (!matchLines(refEdit.lines, actualEdit.lines)) {
+          missing.push(`${refBlock.header}: profiel \"${refName}\" wijkt af`);
+        }
+      } else if (!matchLines(refEdit.lines, actualBlocks[0].lines)) {
+        missing.push(`${refBlock.header}: inhoud wijkt af`);
       }
-    }
-
-    if (missing.length > 0) {
-      return {
-        status: "fail",
-        evidence: `Ontbrekende of afwijkende profielen:\n${missing.map((item) => `- ${item}`).join("\n")}`,
-      };
     }
   }
 
-  const entries = parseFirewallPolicyEdits(index);
-  const deviations: string[] = [];
-
-  const getPolicyLabel = (entry: (typeof entries)[number]) => {
-    const nameLine = entry.lines.find((line) => line.trim().startsWith("set name"));
-    const name = nameLine ? nameLine.split(/\s+/).slice(2).join(" ").replace(/"/g, "").trim() : "";
-    return name ? `${entry.name} (${name})` : entry.name;
-  };
-
-  const getValue = (line: string) => {
-    const tokens = parseQuotedTokens(line);
-    return tokens.join(" ").replace(/"/g, "").trim();
-  };
-
-  for (const entry of entries) {
-    const policyLabel = getPolicyLabel(entry);
-    const utmEnabled = entry.lines.some((line) => line.trim().toLowerCase() === "set utm-status enable");
-    const sslLine = entry.lines.find((line) => line.trim().startsWith("set ssl-ssh-profile"));
-    const webLine = entry.lines.find((line) => line.trim().startsWith("set webfilter-profile"));
-    const appLine = entry.lines.find((line) => line.trim().startsWith("set application-list"));
-
-    if (!utmEnabled && !sslLine && !webLine && !appLine) continue;
-
-    if (sslLine) {
-      const value = getValue(sslLine);
-      const normalized = value.toLowerCase();
-      if (!ALLOWED_SSL_SSH_PROFILES.has(normalized)) {
-        deviations.push(`${policyLabel}: ssl-ssh-profile "${value}"`);
-      }
-    } else if (utmEnabled) {
-      deviations.push(`${policyLabel}: ssl-ssh-profile ontbreekt`);
-    }
-
-    if (webLine) {
-      const value = getValue(webLine);
-      const normalized = value.toLowerCase();
-      if (!ALLOWED_WEBFILTER_PROFILES.has(normalized)) {
-        deviations.push(`${policyLabel}: webfilter-profile "${value}"`);
-      }
-    } else if (utmEnabled) {
-      deviations.push(`${policyLabel}: webfilter-profile ontbreekt`);
-    }
-
-    if (appLine) {
-      const value = getValue(appLine);
-      const normalized = value.toLowerCase();
-      if (!ALLOWED_APPLICATION_LISTS.has(normalized)) {
-        deviations.push(`${policyLabel}: application-list "${value}"`);
-      }
-    } else if (utmEnabled) {
-      deviations.push(`${policyLabel}: application-list ontbreekt`);
-    }
+  if (missing.length > 0) {
+    return {
+      status: "fail",
+      evidence: `Ontbrekende of afwijkende profielen:\n${missing.map((item) => `- ${item}`).join("\n")}`,
+    };
   }
 
-  if (deviations.length === 0) {
-    return { status: "pass" };
-  }
-
-  const preview = deviations.slice(0, 6).join("\n");
-  return { status: "fail", evidence: preview };
+  return { status: "pass" };
 }
 
 function checkSymbisCertificateInspection(index: ConfigIndex): CheckOutcome {

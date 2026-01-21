@@ -722,8 +722,8 @@ export const CHECKS: Record<string, CheckDefinition> = {
         return { satisfied: true, evidence: getBlockSnippet(index, getPolicyBlock(index)) };
       }
 
-      const preview = offenders.slice(0, 3).map((entry) => entry.lines.join("\n")).join("\n\n");
-      const evidence = [`ALL accept policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
+      const allOffenders = offenders.map((entry) => entry.lines.join("\n")).join("\n\n");
+      const evidence = [`ALL accept policies: ${offenders.length}`, allOffenders].filter(Boolean).join("\n\n");
       return {
         satisfied: false,
         evidence,
