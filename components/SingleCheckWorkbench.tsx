@@ -27,18 +27,15 @@ export default function SingleCheckWorkbench() {
   })();
   const hasValidVersion = Boolean(header?.version);
   const hasPasswordMask = header?.passwordMask === true;
-  const canProceed = Boolean(file && hasValidVersion && hasPasswordMask);
+  const canProceed = Boolean(file && hasValidVersion);
   const blockingIssues = useMemo(() => {
     if (!file) return [];
     const issues: string[] = [];
     if (!hasValidVersion) {
       issues.push("Firmware versie ontbreekt in de header (#config-version=...).");
     }
-    if (!hasPasswordMask) {
-      issues.push("Dude geen wachtwoorden erin");
-    }
     return issues;
-  }, [file, hasPasswordMask, hasValidVersion]);
+  }, [file, hasValidVersion]);
 
   const results = useMemo(() => {
     if (!file || !canProceed) return [];
@@ -69,7 +66,7 @@ export default function SingleCheckWorkbench() {
     <div className="w-full space-y-6 animate-in fade-in duration-500">
       <div className="grid grid-cols-1 gap-4">
         <FilePicker
-          label="Single Configuration"
+          label="Baseline Configuration"
           hint="Upload 1 FortiGate .conf of .yaml"
           filename={file?.name ?? null}
           detectedIso={file?.date.iso ?? null}
@@ -83,13 +80,13 @@ export default function SingleCheckWorkbench() {
           <div>
             <h2 className="text-lg font-semibold text-[#fcfdec] flex items-center gap-2">
               <FileSearch size={18} className="text-[#FFEB39]" />
-              Single Config Checklist
+              Baseline Check
             </h2>
             <p className="text-sm text-[#a3a890] mt-1">
               {hasFile
                 ? canProceed
                   ? "Checklist vergeleken met de golden baseline."
-                  : "Header ontbreekt of password mask uitgeschakeld."
+                  : "Firmwareversie ontbreekt in de header."
                 : "Upload een configuratie om te starten."}
             </p>
           </div>
@@ -182,7 +179,7 @@ export default function SingleCheckWorkbench() {
             {visibleResults.length === 0 && (
               <div className="p-6 text-sm text-[#a3a890]">
                 {hasFile && !canProceed
-                  ? "Header ontbreekt of password mask is uitgeschakeld."
+                  ? "Firmwareversie ontbreekt in de header."
                   : hasFile
                     ? "Geen checks in deze filter."
                     : "Upload een bestand om te starten."}

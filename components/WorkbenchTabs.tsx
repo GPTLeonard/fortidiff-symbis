@@ -13,7 +13,7 @@ export default function WorkbenchTabs() {
 
   const tabs: { id: TabId; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
     { id: "diff", label: "Diff Workbench", icon: ArrowLeftRight },
-    { id: "single", label: "Single Check", icon: FileSearch },
+    { id: "single", label: "Baseline Check", icon: FileSearch },
   ];
 
   return (

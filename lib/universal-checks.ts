@@ -59,15 +59,8 @@ const ALLOWED_SSL_SSH_PROFILES = new Set(["symbis-certificate-inspection"]);
 
 const SSL_VPN_CHECKS = new Set(["ssl_vpn_loopback", "ssl_vpn_cipher_suites", "ssl_vpn_timeout_10_uur"]);
 
-const MANUAL_CHECKS = new Set([
-  "server_protecting_actief_op_vips",
-  "malicious_block_op_vips_v3",
-]);
-
-const MANUAL_NOTES: Record<string, string> = {
-  server_protecting_actief_op_vips: "Nog niet geautomatiseerd",
-  malicious_block_op_vips_v3: "Nog niet geautomatiseerd",
-};
+const MANUAL_CHECKS = new Set<string>();
+const MANUAL_NOTES: Record<string, string> = {};
 
 const LOW_END_MODELS = new Set(
   [
@@ -338,6 +331,49 @@ function parseFirewallPolicyEdits(index: ConfigIndex) {
   return parseEdits(block);
 }
 
+function collectTokens(lines: string[], prefix: string) {
+  return lines
+    .filter((line) => line.trim().toLowerCase().startsWith(prefix))
+    .flatMap((line) => parseQuotedTokens(line))
+    .map((token) => stripQuotes(token))
+    .filter(Boolean);
+}
+
+function getPolicyAction(lines: string[]) {
+  const line = lines.find((item) => item.trim().toLowerCase().startsWith("set action"));
+  if (!line) return null;
+  const token = line.trim().split(/\s+/)[2];
+  return token ? token.toLowerCase() : null;
+}
+
+function isPolicyAccept(lines: string[]) {
+  const action = getPolicyAction(lines);
+  return !action || action === "accept";
+}
+
+function isPolicyDeny(lines: string[]) {
+  const action = getPolicyAction(lines);
+  return action === "deny" || action === "reject";
+}
+
+function resolveRequiredDstInterfaces(index: ConfigIndex, base: string[]) {
+  const required = new Set(base.map((item) => item.toLowerCase()));
+  const block = findBlock(index, "config system interface");
+  if (!block) return required;
+  const interfaces = new Set(parseEdits(block).map((entry) => entry.name.toLowerCase()));
+  const filtered = new Set<string>();
+  for (const name of required) {
+    if (name === "virtual-wan-link") {
+      filtered.add(name);
+      continue;
+    }
+    if (interfaces.has(name)) {
+      filtered.add(name);
+    }
+  }
+  return filtered;
+}
+
 function isHaConfigured(block: FgBlock | null) {
   if (!block) return false;
   const lines = block.lines
@@ -345,43 +381,6 @@ function isHaConfigured(block: FgBlock | null) {
     .filter((line) => line.startsWith("set "));
   const meaningful = lines.filter((line) => !line.startsWith("set override "));
   return meaningful.length > 0;
-}
-
-function checkCentralManagement(index: ConfigIndex): CheckOutcome {
-  const block = findBlock(index, "config system central-management");
-  if (!block) return { status: "fail" };
-  const text = block.lines.join("\n").toLowerCase();
-  const hasType =
-    text.includes("set type fortiguard") ||
-    text.includes("set type fortimanager") ||
-    text.includes("set type forticloud") ||
-    text.includes("set type faz") ||
-    text.includes("set type fmg");
-  const enabled = hasType && !text.includes("set type none");
-  return {
-    status: enabled ? "pass" : "fail",
-    evidence: getBlockSnippet(index, block),
-  };
-}
-
-function checkLogging(index: ConfigIndex): CheckOutcome {
-  const logBlocks = [
-    findBlock(index, "config log fortiguard setting"),
-    findBlock(index, "config log fortianalyzer setting"),
-    findBlock(index, "config log fortianalyzer2 setting"),
-  ].filter(Boolean) as FgBlock[];
-
-  for (const block of logBlocks) {
-    const text = block.lines.join("\n").toLowerCase();
-    if (text.includes("set status enable") || text.includes("set upload-option")) {
-      return { status: "pass", evidence: getBlockSnippet(index, block) };
-    }
-  }
-
-  return {
-    status: "fail",
-    evidence: logBlocks[0] ? getBlockSnippet(index, logBlocks[0]) : "",
-  };
 }
 
 function checkIdleTimeout(index: ConfigIndex): CheckOutcome {
@@ -520,8 +519,12 @@ function checkIpsecEncryption(index: ConfigIndex): CheckOutcome {
     return { status: "pass", evidence: total ? `Alle ${total} IPsec entries voldoen.` : "" };
   }
 
-  const preview = offenders.slice(0, 2).join("\n\n");
-  const evidence = [`Afwijkingen: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
+  const maxPreview = 3;
+  const preview = offenders.slice(0, maxPreview).join("\n\n");
+  const suffix =
+    offenders.length > maxPreview ? `Nog ${offenders.length - maxPreview} afwijking(en) niet getoond.` : "";
+  const header = `Afwijkingen: ${offenders.length}${offenders.length > maxPreview ? ` (${maxPreview} getoond)` : ""}`;
+  const evidence = [header, preview, suffix].filter(Boolean).join("\n\n");
   return { status: "fail", evidence };
 }
 
@@ -638,30 +641,55 @@ function checkIpsecBlackholes(index: ConfigIndex): CheckOutcome {
 
 function checkDoHBlocked(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
-  const offenders = entries.filter((entry) => {
-    const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
-    const isDeny = actionLine?.toLowerCase().includes("deny");
-    if (!isDeny) return false;
-    return entry.lines.some((line) => line.trim().toLowerCase().startsWith("set internet-service-name") && line.toLowerCase().includes("dns-doh_dot"));
-  });
+  const requiredDst = resolveRequiredDstInterfaces(index, ["virtual-wan-link", "wan1", "wan2"]);
+  const covered = new Set<string>();
+  const offenders: string[] = [];
 
-  if (offenders.length > 0) {
-    return { status: "pass", evidence: offenders[0].lines.join("\n") };
+  for (const entry of entries) {
+    const dstTokens = collectTokens(entry.lines, "set dstintf").map((token) => token.toLowerCase());
+    const relevantDst = dstTokens.filter((token) => requiredDst.has(token));
+    if (relevantDst.length === 0) continue;
+
+    const serviceTokens = collectTokens(entry.lines, "set internet-service-name").map((token) =>
+      token.toLowerCase()
+    );
+    const hasDoH = serviceTokens.includes("dns-doh_dot");
+    if (!hasDoH) continue;
+
+    if (!isPolicyDeny(entry.lines)) {
+      offenders.push(entry.lines.join("\n"));
+      continue;
+    }
+
+    for (const dst of relevantDst) {
+      covered.add(dst);
+    }
   }
 
-  return { status: "fail" };
+  const missing = [...requiredDst].filter((dst) => !covered.has(dst));
+  if (missing.length === 0 && offenders.length === 0) {
+    return { status: "pass" };
+  }
+
+  const evidenceParts = [];
+  if (missing.length > 0) {
+    evidenceParts.push(`Geen DoH deny voor dstintf: ${missing.join(", ")}`);
+  }
+  if (offenders.length > 0) {
+    evidenceParts.push(offenders.slice(0, 2).join("\n\n"));
+  }
+
+  return { status: "fail", evidence: evidenceParts.join("\n\n") };
 }
 
 function checkQuicPolicy(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   const offenders = entries.filter((entry) => {
-    const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
-    const isAccept = actionLine?.toLowerCase().includes("accept");
-    if (!isAccept) return false;
+    if (!isPolicyAccept(entry.lines)) return false;
     const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
     if (!serviceLine) return false;
     const tokens = parseServiceTokens(serviceLine).map((token) => token.toUpperCase());
-    return tokens.includes("QUIC") || tokens.includes("ALL");
+    return tokens.includes("QUIC");
   });
 
   if (offenders.length === 0) {
@@ -691,12 +719,45 @@ function checkIpsCpAccel(index: ConfigIndex): CheckOutcome {
 
 function checkInterfaceRole(index: ConfigIndex): CheckOutcome {
   const block = findBlock(index, "config system interface");
-  if (!block) return { status: "fail" };
+  if (!block) return { status: "pass" };
   const hasRole = block.lines.some((line) => line.trim().toLowerCase().startsWith("set role "));
   return {
     status: "pass",
     evidence: hasRole ? getBlockSnippet(index, block) : "",
   };
+}
+
+function formatLoopbackEvidence(lines: string[]) {
+  const keep = (line: string) => {
+    const trimmed = line.trim().toLowerCase();
+    return (
+      trimmed.startsWith("edit ") ||
+      trimmed.startsWith("set vdom ") ||
+      trimmed.startsWith("set ip ") ||
+      trimmed.startsWith("set allowaccess ") ||
+      trimmed.startsWith("set type ") ||
+      trimmed.startsWith("set role ") ||
+      trimmed === "next"
+    );
+  };
+  const filtered = lines.filter(keep);
+  return ["config system interface", ...filtered, "end"].join("\n");
+}
+
+function checkSslVpnLoopback(index: ConfigIndex): CheckOutcome {
+  const block = findBlock(index, "config system interface");
+  if (!block) return { status: "fail" };
+  const entry = parseEdits(block).find((edit) => edit.name.toLowerCase() === "sslvpn_loopback");
+  if (!entry) {
+    return { status: "fail", evidence: "SSLVPN_Loopback ontbreekt." };
+  }
+
+  const hasIp = entry.lines.some((line) =>
+    /set ip\s+192\.168\.192\.168\s+255\.255\.255\.255/i.test(line.trim())
+  );
+  const hasType = entry.lines.some((line) => /set type\s+loopback/i.test(line.trim()));
+  const evidence = formatLoopbackEvidence(entry.lines);
+  return { status: hasIp && hasType ? "pass" : "fail", evidence };
 }
 
 function checkLocalInPolicy(index: ConfigIndex): CheckOutcome {
@@ -751,13 +812,13 @@ function checkExternalSymbisLists(index: ConfigIndex): CheckOutcome {
 function checkServicesNotStacked(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   for (const entry of entries) {
-    const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
-    if (serviceLine) {
-      const tokens = parseServiceTokens(serviceLine);
-      if (tokens.length > 7) {
-        const evidence = `Services count: ${tokens.length}\n${entry.lines.join("\n")}`;
-        return { status: "fail", evidence };
-      }
+    if (!isPolicyAccept(entry.lines)) continue;
+    const serviceLines = entry.lines.filter((line) => line.trim().startsWith("set service"));
+    if (serviceLines.length === 0) continue;
+    const tokens = serviceLines.flatMap((line) => parseServiceTokens(line));
+    if (tokens.length > 7) {
+      const evidence = `Services count: ${tokens.length}\n${entry.lines.join("\n")}`;
+      return { status: "fail", evidence };
     }
   }
   return { status: "pass", evidence: getBlockSnippet(index, findBlock(index, "config firewall policy")) };
@@ -773,6 +834,19 @@ function checkLogtrafficStartDisabled(index: ConfigIndex): CheckOutcome {
   }
   const preview = offenders.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
   const evidence = [`logtraffic-start enable policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
+  return { status: "fail", evidence };
+}
+
+function checkMatchVipEnabled(index: ConfigIndex): CheckOutcome {
+  const entries = parseFirewallPolicyEdits(index);
+  const offenders = entries.filter((entry) =>
+    entry.lines.some((line) => line.trim().toLowerCase() === "set match-vip disable")
+  );
+  if (offenders.length === 0) {
+    return { status: "pass" };
+  }
+  const preview = offenders.slice(0, 2).map((entry) => entry.lines.join("\n")).join("\n\n");
+  const evidence = [`match-vip disable policies: ${offenders.length}`, preview].filter(Boolean).join("\n\n");
   return { status: "fail", evidence };
 }
 
@@ -800,9 +874,7 @@ function checkSslLabsObject(index: ConfigIndex): CheckOutcome {
 function checkAllServiceNotUsed(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   const offenders = entries.filter((entry) => {
-    const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
-    const isAccept = actionLine?.toLowerCase().includes("accept");
-    if (!isAccept) return false;
+    if (!isPolicyAccept(entry.lines)) return false;
     const serviceLine = entry.lines.find((line) => line.trim().startsWith("set service"));
     if (!serviceLine) return false;
     const tokens = parseServiceTokens(serviceLine).map((token) => token.toUpperCase());
@@ -969,56 +1041,42 @@ function checkSymbisCertificateInspection(index: ConfigIndex): CheckOutcome {
 function checkMaliciousBlock(index: ConfigIndex): CheckOutcome {
   const entries = parseFirewallPolicyEdits(index);
   const required = new Set(REQUIRED_MALICIOUS_SERVICES.map((item) => item.toLowerCase()));
-  const srcCoverage = new Map<string, boolean>();
+  const requiredDst = resolveRequiredDstInterfaces(index, ["virtual-wan-link", "wan1", "wan2"]);
+  const dstCoverage = new Map<string, boolean>();
   const offenders: string[] = [];
 
-  const parseQuoted = (line: string) => {
-    const matches = line.match(/"([^"]+)"/g);
-    if (matches && matches.length > 0) {
-      return matches.map((match) => match.replace(/"/g, ""));
-    }
-    return line.split(/\s+/).slice(2);
-  };
-
   for (const entry of entries) {
-    const dstLine = entry.lines.find((line) => line.trim().startsWith("set dstintf"));
-    if (!dstLine) continue;
-    const dstTokens = parseQuoted(dstLine).map((token) => token.toLowerCase());
-    if (!dstTokens.includes("virtual-wan-link")) continue;
+    const dstTokens = collectTokens(entry.lines, "set dstintf").map((token) => token.toLowerCase());
+    const relevantDst = dstTokens.filter((token) => requiredDst.has(token));
+    if (relevantDst.length === 0) continue;
 
-    const srcLine = entry.lines.find((line) => line.trim().startsWith("set srcintf"));
-    const srcTokens = srcLine ? parseQuoted(srcLine).map((token) => token.toLowerCase()) : [];
-    for (const src of srcTokens) {
-      if (!srcCoverage.has(src)) srcCoverage.set(src, false);
-    }
-
-    const actionLine = entry.lines.find((line) => line.trim().startsWith("set action"));
-    const isDeny = actionLine?.toLowerCase().includes("deny");
-    const serviceLines = entry.lines.filter((line) => line.trim().startsWith("set internet-service-name"));
-    const serviceTokens = serviceLines.flatMap((line) => parseQuoted(line)).map((token) => token.toLowerCase());
+    const serviceTokens = collectTokens(entry.lines, "set internet-service-name").map((token) =>
+      token.toLowerCase()
+    );
+    const hasAny = serviceTokens.some((token) => required.has(token));
+    if (!hasAny) continue;
 
     const hasAllServices = [...required].every((token) => serviceTokens.includes(token));
-    if (!isDeny) continue;
-    if (hasAllServices) {
-      for (const src of srcTokens) {
-        srcCoverage.set(src, true);
+    if (isPolicyDeny(entry.lines) && hasAllServices) {
+      for (const dst of relevantDst) {
+        dstCoverage.set(dst, true);
       }
     } else {
       offenders.push(entry.lines.join("\n"));
     }
   }
 
-  const missingSrc = [...srcCoverage.entries()].filter(([, ok]) => !ok).map(([src]) => src);
-  if (missingSrc.length === 0 && offenders.length === 0 && srcCoverage.size > 0) {
+  const missingDst = [...requiredDst].filter((dst) => !dstCoverage.get(dst));
+  if (missingDst.length === 0 && offenders.length === 0 && dstCoverage.size > 0) {
     return { status: "pass" };
   }
 
   const evidenceParts = [];
-  if (srcCoverage.size === 0) {
-    evidenceParts.push('Geen policies gevonden met dstintf "virtual-wan-link".');
+  if (dstCoverage.size === 0) {
+    evidenceParts.push('Geen policies gevonden met dstintf "virtual-wan-link", "wan1" of "wan2".');
   }
-  if (missingSrc.length > 0) {
-    evidenceParts.push(`Geen Malicious_deny voor: ${missingSrc.join(", ")}`);
+  if (missingDst.length > 0) {
+    evidenceParts.push(`Geen Malicious_deny voor: ${missingDst.join(", ")}`);
   }
   if (offenders.length > 0) {
     evidenceParts.push(offenders.slice(0, 2).join("\n\n"));
@@ -1045,9 +1103,130 @@ function checkDefaultRouteSdwan(index: ConfigIndex): CheckOutcome {
   };
 }
 
+function checkServerProtectingVip(index: ConfigIndex): CheckOutcome {
+  const vipBlock = findBlock(index, "config firewall vip");
+  if (!vipBlock) return { status: "pass", evidence: "Geen VIPs gevonden." };
+  const vipEntries = parseEdits(vipBlock);
+  if (vipEntries.length === 0) return { status: "pass", evidence: "Geen VIPs gevonden." };
+
+  const vipNames = vipEntries.map((entry) => entry.name).filter(Boolean);
+  const vipByLower = new Map(vipNames.map((name) => [name.toLowerCase(), name]));
+  const coverage = new Map<string, boolean>();
+  for (const [key] of vipByLower) coverage.set(key, false);
+
+  const sslBlock = findBlock(index, "config firewall ssl-ssh-profile");
+  const sslEntries = sslBlock ? parseEdits(sslBlock) : [];
+  const serverCertProfiles = new Set(
+    sslEntries
+      .filter((entry) => entry.lines.some((line) => line.trim().toLowerCase().startsWith("set server-cert ")))
+      .map((entry) => entry.name.toLowerCase())
+  );
+
+  const entries = parseFirewallPolicyEdits(index);
+  const issues: string[] = [];
+
+  const formatPolicyLabel = (entry: (typeof entries)[number]) => {
+    const nameLine = entry.lines.find((line) => line.trim().startsWith("set name"));
+    const name = nameLine ? nameLine.split(/\s+/).slice(2).join(" ").replace(/"/g, "").trim() : "";
+    return name ? `${entry.name} (${name})` : entry.name;
+  };
+
+  let anyVipPolicy = false;
+
+  for (const entry of entries) {
+    if (!isPolicyAccept(entry.lines)) continue;
+    const dstTokens = collectTokens(entry.lines, "set dstaddr").map((token) => token.toLowerCase());
+    const matchedVips = dstTokens.filter((token) => vipByLower.has(token));
+    if (matchedVips.length === 0) continue;
+    anyVipPolicy = true;
+
+    const profileLine = entry.lines.find((line) => line.trim().startsWith("set ssl-ssh-profile"));
+    const profileName = profileLine ? parseQuotedTokens(profileLine)[0] : null;
+    const profileKey = profileName ? profileName.toLowerCase() : null;
+    const hasServerCert = profileKey ? serverCertProfiles.has(profileKey) : false;
+
+    for (const vip of matchedVips) {
+      if (hasServerCert) {
+        coverage.set(vip, true);
+      } else {
+        const reason = profileName
+          ? `ssl-ssh-profile "${profileName}" mist server-cert`
+          : "ssl-ssh-profile ontbreekt";
+        issues.push(`${vipByLower.get(vip)}: ${reason} (${formatPolicyLabel(entry)})`);
+      }
+    }
+  }
+
+  const missing = [...coverage.entries()].filter(([, ok]) => !ok).map(([vip]) => vipByLower.get(vip) ?? vip);
+  if (missing.length === 0) {
+    return { status: "pass", evidence: getBlockSnippet(index, vipBlock) };
+  }
+
+  const evidenceParts = [];
+  if (!anyVipPolicy) {
+    evidenceParts.push("Geen policies gevonden die VIPs gebruiken.");
+  }
+  evidenceParts.push(`VIPs zonder server-protect policy: ${missing.join(", ")}`);
+  if (issues.length > 0) {
+    evidenceParts.push(issues.slice(0, 6).join("\n"));
+  }
+
+  return { status: "fail", evidence: evidenceParts.join("\n\n") };
+}
+
+function checkMaliciousBlockVip(index: ConfigIndex): CheckOutcome {
+  const vipBlock = findBlock(index, "config firewall vip");
+  if (!vipBlock) return { status: "pass", evidence: "Geen VIPs gevonden." };
+  const vipEntries = parseEdits(vipBlock);
+  if (vipEntries.length === 0) return { status: "pass", evidence: "Geen VIPs gevonden." };
+
+  const vipNames = vipEntries.map((entry) => entry.name).filter(Boolean);
+  const vipByLower = new Map(vipNames.map((name) => [name.toLowerCase(), name]));
+  const coverage = new Map<string, boolean>();
+  for (const [key] of vipByLower) coverage.set(key, false);
+
+  const required = new Set(REQUIRED_MALICIOUS_SERVICES.map((item) => item.toLowerCase()));
+  const entries = parseFirewallPolicyEdits(index);
+  const offenders: string[] = [];
+
+  for (const entry of entries) {
+    const dstTokens = collectTokens(entry.lines, "set dstaddr").map((token) => token.toLowerCase());
+    const matchedVips = dstTokens.filter((token) => vipByLower.has(token));
+    if (matchedVips.length === 0) continue;
+
+    const serviceTokens = collectTokens(entry.lines, "set internet-service-src-name").map((token) =>
+      token.toLowerCase()
+    );
+    const hasAny = serviceTokens.some((token) => required.has(token));
+    if (!hasAny) continue;
+
+    const hasAll = [...required].every((token) => serviceTokens.includes(token));
+    if (isPolicyDeny(entry.lines) && hasAll) {
+      for (const vip of matchedVips) {
+        coverage.set(vip, true);
+      }
+    } else {
+      offenders.push(entry.lines.join("\n"));
+    }
+  }
+
+  const missing = [...coverage.entries()].filter(([, ok]) => !ok).map(([vip]) => vipByLower.get(vip) ?? vip);
+  if (missing.length === 0 && offenders.length === 0) {
+    return { status: "pass" };
+  }
+
+  const evidenceParts = [];
+  if (missing.length > 0) {
+    evidenceParts.push(`VIPs zonder malicious_deny policy: ${missing.join(", ")}`);
+  }
+  if (offenders.length > 0) {
+    evidenceParts.push(offenders.slice(0, 2).join("\n\n"));
+  }
+
+  return { status: "fail", evidence: evidenceParts.join("\n\n") };
+}
+
 const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
-  central_management_ingeschakeld: checkCentralManagement,
-  logging_naar_cloud_of_analyzer: checkLogging,
   idle_timeout_maximaal_15_minuten: checkIdleTimeout,
   ha_session_pickup: checkHaSessionPickup,
   geen_verschil_in_ha_device_priority: checkHaDevicePriority,
@@ -1062,6 +1241,7 @@ const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
   quic_protocol_is_niet_toegestaan: checkQuicPolicy,
   ips_cp_accel_mode_none: checkIpsCpAccel,
   firewall_policies_logtraffic_start_disabled: checkLogtrafficStartDisabled,
+  policy_met_vips_is_match_vip_enabled: checkMatchVipEnabled,
   ssl_labs_object: checkSslLabsObject,
   services_in_firewall_policies_zijn_niet_gestapeld: checkServicesNotStacked,
   all_service_wordt_niet_gebruikt_in_firewall_policies: checkAllServiceNotUsed,
@@ -1072,6 +1252,9 @@ const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
   symbis_certificate_inspection: checkSymbisCertificateInspection,
   uitgaande_malicious_block_v2: checkMaliciousBlock,
   default_route_is_sd_wan_zone: checkDefaultRouteSdwan,
+  ssl_vpn_loopback: checkSslVpnLoopback,
+  server_protecting_actief_op_vips: checkServerProtectingVip,
+  malicious_block_op_vips_v3: checkMaliciousBlockVip,
 };
 
 function evaluateDefinition(
