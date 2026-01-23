@@ -78,7 +78,6 @@ const LOW_END_MODELS = new Set(
     "FG-60F",
     "FG-61E",
     "FG-61F",
-    "FG-70F",
     "FG-70G-POE",
     "FG-71F",
     "FG-71G",
@@ -92,9 +91,37 @@ const LOW_END_MODELS = new Set(
   ].map((model) => normalizeModelName(model) as string)
 );
 
+const BASELINE_MODEL_CHECKS = new Set(
+  [
+    "FG-40E",
+    "FG-60E",
+    "FG-40F",
+    "FG-60F",
+    "FG-61F",
+    "FG-70F",
+    "FG-80F",
+    "FG-40G",
+    "FG-60G",
+    "FG-70G",
+    "FG-80G",
+  ].map((model) => normalizeModelName(model) as string)
+);
+
 function normalizeModelName(model: string | null) {
   if (!model) return null;
   return model.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^FGT/, "FG");
+}
+
+function isModelInSet(model: string | null, allowed: Set<string>) {
+  const normalized = normalizeModelName(model);
+  if (!normalized) return false;
+  return allowed.has(normalized);
+}
+
+function isHardwareModel(model: string | null) {
+  if (!model) return false;
+  const normalized = model.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return normalized.startsWith("FGT") || normalized.startsWith("FGR");
 }
 
 function isSslVpnSupported(model: string | null) {
@@ -325,9 +352,9 @@ function parseQuotedTokens(line: string) {
 }
 
 function parseFirewallPolicyEdits(index: ConfigIndex) {
-  const block = findBlock(index, "config firewall policy");
-  if (!block) return [];
-  return parseEdits(block);
+  const blocks = index.blocksByHeader.get("config firewall policy") ?? [];
+  if (blocks.length === 0) return [];
+  return blocks.flatMap((block) => parseEdits(block));
 }
 
 function collectTokens(lines: string[], prefix: string) {
@@ -457,6 +484,7 @@ function checkLocalUsers(index: ConfigIndex): CheckOutcome {
   if (entries.length === 0) return { status: "pass" };
 
   const offenders = entries.filter((entry) => {
+    if (entry.name?.toLowerCase() === "guest") return false;
     const statusLine = entry.lines.find((line) => line.trim().startsWith("set status"));
     if (!statusLine) return true;
     return !/set status\s+disable/i.test(statusLine.trim());
@@ -564,10 +592,31 @@ function checkIpsecKeylife(index: ConfigIndex): CheckOutcome {
 }
 
 function checkIpsecBlackholes(index: ConfigIndex): CheckOutcome {
+  const phase1Blocks = findBlocksByPrefix(index, "config vpn ipsec phase1");
+  const phase1Names = new Set(
+    phase1Blocks.flatMap((block) => parseEdits(block).map((entry) => entry.name.toLowerCase()))
+  );
+  if (phase1Names.size === 0) {
+    return { status: "manual", note: "Geen IPsec-config gevonden" };
+  }
+
   const block = findBlock(index, "config router static");
-  if (!block) return { status: "fail" };
+  if (!block) return { status: "manual", note: "Geen static routes gevonden" };
   const entries = parseEdits(block);
-  if (entries.length === 0) return { status: "fail", evidence: getBlockSnippet(index, block) };
+  if (entries.length === 0) {
+    return { status: "manual", note: "Geen static routes gevonden", evidence: getBlockSnippet(index, block) };
+  }
+
+  const hasIpsecStaticRoute = entries.some((entry) => {
+    const deviceLine = entry.lines.find((line) => line.trim().startsWith("set device"));
+    if (!deviceLine) return false;
+    const device = deviceLine.split(/\s+/).slice(2).join(" ").replace(/"/g, "").trim().toLowerCase();
+    return device !== "" && phase1Names.has(device);
+  });
+
+  if (!hasIpsecStaticRoute) {
+    return { status: "manual", note: "Geen IPsec static routes gevonden", evidence: getBlockSnippet(index, block) };
+  }
 
   const blackholeByDst = new Map<string, boolean>();
   const badBlackholes: string[] = [];
@@ -750,6 +799,52 @@ function checkSslVpnLoopback(index: ConfigIndex): CheckOutcome {
   return { status: hasIp && hasType ? "pass" : "fail", evidence };
 }
 
+function checkAutoFirmwareUpgrade(index: ConfigIndex): CheckOutcome {
+  const definition = checkDefinitions.find((item) => item.id === "auto_firmware_upgrade");
+  if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
+  const header = parseConfigHeader(index.text);
+  if (!header.model) return { status: "manual", note: "Model onbekend" };
+  if (!isModelInSet(header.model, BASELINE_MODEL_CHECKS)) {
+    return { status: "manual", note: `Niet van toepassing voor model (${header.model})` };
+  }
+  return evaluateReference(definition, index, false, false);
+}
+
+function checkCentralManagement(index: ConfigIndex): CheckOutcome {
+  const definition = checkDefinitions.find((item) => item.id === "central_management_ingeschakeld");
+  if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
+  const header = parseConfigHeader(index.text);
+  if (!header.model) return { status: "manual", note: "Model onbekend" };
+  if (!isModelInSet(header.model, BASELINE_MODEL_CHECKS)) {
+    return { status: "manual", note: `Niet van toepassing voor model (${header.model})` };
+  }
+  return evaluateReference(definition, index, false, false);
+}
+
+function checkFortiLinkNtp(index: ConfigIndex): CheckOutcome {
+  const definition = checkDefinitions.find(
+    (item) => item.id === "fortilink_beschikbaar_en_gekoppeld_aan_ntp_interface"
+  );
+  if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
+  const header = parseConfigHeader(index.text);
+  if (!header.model) return { status: "manual", note: "Model onbekend" };
+  if (!isHardwareModel(header.model)) {
+    return { status: "manual", note: `Niet van toepassing voor model (${header.model})` };
+  }
+  return evaluateReference(definition, index, false, false);
+}
+
+function checkSdwanPerformance(index: ConfigIndex): CheckOutcome {
+  const definition = checkDefinitions.find((item) => item.id === "sd_wan_performance_sla_minimum_ping");
+  if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
+  const sdwan = findBlock(index, "config system sdwan");
+  const sdwanEnabled = sdwan ? sdwan.lines.join("\n").toLowerCase().includes("set status enable") : false;
+  if (!sdwanEnabled) {
+    return { status: "manual", note: "SD-WAN niet actief", evidence: getBlockSnippet(index, sdwan) };
+  }
+  return evaluateReference(definition, index, false, false);
+}
+
 function checkLocalInPolicy(index: ConfigIndex): CheckOutcome {
   const definition = checkDefinitions.find((item) => item.id === "local_in_policy_v7");
   if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
@@ -797,6 +892,26 @@ function checkExternalSymbisLists(index: ConfigIndex): CheckOutcome {
 
   const evidence = `Missende lists:\n${missing.map((req) => `- ${req.label}`).join("\n")}`;
   return { status: "fail", evidence };
+}
+
+function checkAutomationStitches(index: ConfigIndex): CheckOutcome {
+  const definition = checkDefinitions.find((item) => item.id === "automation_stitches_v13");
+  if (!definition?.reference) return { status: "manual", note: "Geen referentie beschikbaar" };
+
+  const refBlocks = buildReferenceBlocks(definition.reference).map((block) => ({
+    ...block,
+    edits: block.edits.map((edit) => ({
+      ...edit,
+      lines: edit.lines.filter((line) => !/^set description\b/i.test(line.trim())),
+    })),
+  }));
+
+  const match = findReferenceMatch(index, refBlocks, true);
+  if (match.ok) {
+    return { status: "pass" };
+  }
+
+  return { status: "fail", evidence: match.evidence };
 }
 
 function checkServicesNotStacked(index: ConfigIndex): CheckOutcome {
@@ -936,8 +1051,10 @@ function checkSymbisUtmProfiles(index: ConfigIndex): CheckOutcome {
 }
 
 function checkSymbisCertificateInspection(index: ConfigIndex): CheckOutcome {
-  const block = findBlock(index, "config firewall ssl-ssh-profile");
-  const hasSymbisProfile = block?.lines.join("\n").toLowerCase().includes('edit "symbis-certificate-inspection"') ?? false;
+  const blocks = index.blocksByHeader.get("config firewall ssl-ssh-profile") ?? [];
+  const hasSymbisProfile = blocks.some((block) =>
+    block.lines.join("\n").toLowerCase().includes('edit "symbis-certificate-inspection"')
+  );
 
   const offenders: string[] = [];
   const entries = parseFirewallPolicyEdits(index);
@@ -963,7 +1080,7 @@ function checkSymbisCertificateInspection(index: ConfigIndex): CheckOutcome {
 
   return {
     status: hasSymbisProfile ? "pass" : "fail",
-    evidence: getBlockSnippet(index, block),
+    evidence: getBlockSnippet(index, blocks[0] ?? null),
   };
 }
 
@@ -1023,7 +1140,9 @@ function checkDefaultRouteSdwan(index: ConfigIndex): CheckOutcome {
   const block = findBlock(index, "config router static");
   const evidence = getBlockSnippet(index, block);
   if (!sdwanEnabled) {
-    return { status: "manual", note: "SD-WAN niet actief", evidence };
+    const details = sdwan ? getBlockSnippet(index, sdwan) : "";
+    const message = "SD-WAN niet actief.";
+    return { status: "fail", evidence: [message, details].filter(Boolean).join("\n\n") };
   }
   const match = block?.lines.some((line) => /set (device|sdwan-zone) "virtual-wan-link"/i.test(line.trim()));
   return {
@@ -1033,9 +1152,9 @@ function checkDefaultRouteSdwan(index: ConfigIndex): CheckOutcome {
 }
 
 function checkServerProtectingVip(index: ConfigIndex): CheckOutcome {
-  const vipBlock = findBlock(index, "config firewall vip");
-  if (!vipBlock) return { status: "pass", evidence: "Geen VIPs gevonden." };
-  const vipEntries = parseEdits(vipBlock);
+  const vipBlocks = index.blocksByHeader.get("config firewall vip") ?? [];
+  if (vipBlocks.length === 0) return { status: "pass", evidence: "Geen VIPs gevonden." };
+  const vipEntries = vipBlocks.flatMap((block) => parseEdits(block));
   if (vipEntries.length === 0) return { status: "pass", evidence: "Geen VIPs gevonden." };
 
   const vipNames = vipEntries.map((entry) => entry.name).filter(Boolean);
@@ -1088,7 +1207,7 @@ function checkServerProtectingVip(index: ConfigIndex): CheckOutcome {
 
   const missing = [...coverage.entries()].filter(([, ok]) => !ok).map(([vip]) => vipByLower.get(vip) ?? vip);
   if (missing.length === 0) {
-    return { status: "pass", evidence: getBlockSnippet(index, vipBlock) };
+    return { status: "pass", evidence: getBlockSnippet(index, vipBlocks[0] ?? null) };
   }
 
   const evidenceParts = [];
@@ -1104,9 +1223,9 @@ function checkServerProtectingVip(index: ConfigIndex): CheckOutcome {
 }
 
 function checkMaliciousBlockVip(index: ConfigIndex): CheckOutcome {
-  const vipBlock = findBlock(index, "config firewall vip");
-  if (!vipBlock) return { status: "pass", evidence: "Geen VIPs gevonden." };
-  const vipEntries = parseEdits(vipBlock);
+  const vipBlocks = index.blocksByHeader.get("config firewall vip") ?? [];
+  if (vipBlocks.length === 0) return { status: "pass", evidence: "Geen VIPs gevonden." };
+  const vipEntries = vipBlocks.flatMap((block) => parseEdits(block));
   if (vipEntries.length === 0) return { status: "pass", evidence: "Geen VIPs gevonden." };
 
   const vipNames = vipEntries.map((entry) => entry.name).filter(Boolean);
@@ -1165,6 +1284,10 @@ function checkMaliciousBlockVip(index: ConfigIndex): CheckOutcome {
 }
 
 const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
+  auto_firmware_upgrade: checkAutoFirmwareUpgrade,
+  central_management_ingeschakeld: checkCentralManagement,
+  fortilink_beschikbaar_en_gekoppeld_aan_ntp_interface: checkFortiLinkNtp,
+  sd_wan_performance_sla_minimum_ping: checkSdwanPerformance,
   idle_timeout_maximaal_15_minuten: checkIdleTimeout,
   ha_session_pickup: checkHaSessionPickup,
   geen_verschil_in_ha_device_priority: checkHaDevicePriority,
@@ -1186,6 +1309,7 @@ const CUSTOM_HANDLERS: Record<string, (index: ConfigIndex) => CheckOutcome> = {
   local_in_policy_v7: checkLocalInPolicy,
   global_black_en_whitelist_github: checkExternalSymbisLists,
   all_service_is_rood: checkAllServiceRed,
+  automation_stitches_v13: checkAutomationStitches,
   symbis_utm_profiles_v7: checkSymbisUtmProfiles,
   symbis_certificate_inspection: checkSymbisCertificateInspection,
   uitgaande_malicious_block_v2: checkMaliciousBlock,

@@ -26,7 +26,6 @@ export default function SingleCheckWorkbench() {
     return patch < 0;
   })();
   const hasValidVersion = Boolean(header?.version);
-  const hasPasswordMask = header?.passwordMask === true;
   const canProceed = Boolean(file && hasValidVersion);
   const blockingIssues = useMemo(() => {
     if (!file) return [];
@@ -132,9 +131,6 @@ export default function SingleCheckWorkbench() {
                   : "Uitgeschakeld"
                 : "Onbekend"}
             </div>
-            {!hasPasswordMask && hasFile && (
-              <div className="text-xs text-[#FFB347]">Dude geen wachtwoorden erin</div>
-            )}
           </div>
         </div>
 

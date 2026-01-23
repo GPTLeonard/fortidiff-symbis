@@ -122,7 +122,6 @@ const LOW_END_MODELS = new Set(
     "FG-60F",
     "FG-61E",
     "FG-61F",
-    "FG-70F",
     "FG-70G-POE",
     "FG-71F",
     "FG-71G",
@@ -185,9 +184,9 @@ function parseInterfaceEdits(index: ConfigIndex): ReturnType<typeof parseEdits> 
 }
 
 function parseFirewallPolicyEdits(index: ConfigIndex): ReturnType<typeof parseEdits> {
-  const block = getPolicyBlock(index);
-  if (!block) return [];
-  return parseEdits(block);
+  const blocks = index.blocksByHeader.get("config firewall policy") ?? [];
+  if (blocks.length === 0) return [];
+  return blocks.flatMap((block) => parseEdits(block));
 }
 
 function parseServiceTokens(line: string): string[] {

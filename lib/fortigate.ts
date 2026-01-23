@@ -29,7 +29,9 @@ export type ConfigHeader = {
 
 export function createConfigIndex(text: string): ConfigIndex {
   const lines = text.split(/\r?\n/);
-  const blocks = parseBlocks(lines);
+  const rootBlocks = parseBlocks(lines);
+  const vdomBlocks = extractVdomBlocks(rootBlocks);
+  const blocks = [...rootBlocks, ...vdomBlocks];
   const blocksByHeader = new Map<string, FgBlock[]>();
   for (const block of blocks) {
     const list = blocksByHeader.get(block.header) ?? [];
@@ -44,6 +46,28 @@ export function createConfigIndex(text: string): ConfigIndex {
     blocks,
     blocksByHeader,
   };
+}
+
+function extractVdomBlocks(blocks: FgBlock[]): FgBlock[] {
+  const vdomBlocks = blocks.filter((block) => block.header === "config vdom");
+  if (vdomBlocks.length === 0) return [];
+
+  const extracted: FgBlock[] = [];
+  for (const vdomBlock of vdomBlocks) {
+    const vdomEdits = parseEdits(vdomBlock);
+    for (const edit of vdomEdits) {
+      const nestedBlocks = parseBlocks(edit.lines);
+      for (const block of nestedBlocks) {
+        extracted.push({
+          ...block,
+          start: block.start + edit.start,
+          end: block.end + edit.start,
+        });
+      }
+    }
+  }
+
+  return extracted;
 }
 
 export function parseConfigHeader(text: string): ConfigHeader {

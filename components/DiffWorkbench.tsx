@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import FilePicker from "@/components/FilePicker";
 import { type ExtractedDiff, extractDiff, optimizeDiffForAI } from "@/lib/diff";
 import { type DetectedDate, detectConfigDate } from "@/lib/date";
 import { copyToClipboard, downloadText } from "@/lib/download";
-import { parseConfigHeader } from "@/lib/fortigate";
 import { ArrowLeftRight, Copy, Download, FileJson, FileText, Split, Terminal } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -42,19 +41,6 @@ export default function DiffWorkbench() {
     const [aiOutput, setAiOutput] = useState<string>("");
     const [aiError, setAiError] = useState<string>("");
     const [aiLoading, setAiLoading] = useState(false);
-    const oldHeader = useMemo(() => (oldFile ? parseConfigHeader(oldFile.text) : null), [oldFile]);
-    const newHeader = useMemo(() => (newFile ? parseConfigHeader(newFile.text) : null), [newFile]);
-    const passwordWarnings = useMemo(() => {
-        const warnings: string[] = [];
-        if (oldFile && oldHeader?.passwordMask !== true) {
-            warnings.push(`Dude geen wachtwoorden erin (${oldFile.name})`);
-        }
-        if (newFile && newHeader?.passwordMask !== true) {
-            warnings.push(`Dude geen wachtwoorden erin (${newFile.name})`);
-        }
-        return warnings;
-    }, [oldFile, oldHeader, newFile, newHeader]);
-
     // Auto-swap logic
     useEffect(() => {
         if (oldFile?.date.time && newFile?.date.time) {
@@ -236,14 +222,6 @@ ${diffContent}`;
                     onText={(text, name) => handleFile("right", text, name)}
                 />
             </div>
-            {passwordWarnings.length > 0 && (
-                <div className="rounded-xl border border-[#FFB347]/30 bg-[#2a1208]/50 px-4 py-3 text-xs text-[#FFB347] space-y-1">
-                    {passwordWarnings.map((warning) => (
-                        <div key={warning}>{warning}</div>
-                    ))}
-                </div>
-            )}
-
             {/* Editor Container */}
             <div className="bg-[#121a08]/80 border border-[#94A807]/20 backdrop-blur-xl shadow-2xl rounded-xl overflow-hidden flex flex-col h-[700px]">
                 {/* Editor Toolbar */}
